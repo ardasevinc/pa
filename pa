@@ -276,7 +276,8 @@ main() {
     glob "$command" '[adesm]*' && [ -z "$name" ] &&
         die "missing [name] argument"
 
-    glob "$command" '[adesm]*' && { glob "$name" '/*' || glob "$name" '*/'; } &&
+    glob "$command" '[adesm]*' && { glob "$name" '/*' || glob "$name" '*/' ||
+        glob "$src" '/*' || glob "$src" '*/'; } &&
         die "name can't start or end with '/'"
 
     glob "$command" 'l*' && glob "$name" '/*' &&

@@ -1,11 +1,28 @@
 # requires bash-completion >= v2.12.0, preferably >= v2.17.0
 
+_comp_pa_entries() {
+	pushd "$PA_DIR/passwords" &>/dev/null || return
+	_comp_compgen_split -l "$(find . -type f -name \*.age | sed 's/..//;s/\.age$//')"
+	popd &>/dev/null || return
+}
+
+_comp_pa_categories() {
+	_comp_compgen -C "$PA_DIR/passwords" filedir -df
+	local i
+	for i in "${!COMPREPLY[@]}"; do
+		if [[ ${COMPREPLY[i]} == .git/ ]]; then
+			unset 'COMPREPLY[i]'
+			break
+		fi
+	done
+}
+
 _comp_cmd_pa() {
 	local words cword
 	_comp_initialize -- "$@" || return
 
 	if [[ $cword -eq 1 ]]; then
-		_comp_compgen_split "add del edit git list show"
+		_comp_compgen_split "add del edit git list move show"
 		return
 	fi
 
@@ -13,21 +30,13 @@ _comp_cmd_pa() {
 	[[ -d $PA_DIR/passwords ]] || return
 
 	case ${words[1]} in
-	[al]*)
+	[al]*) [[ $cword -eq 2 ]] && _comp_pa_categories ;;
+	[des]*) [[ $cword -eq 2 ]] && _comp_pa_entries ;;
+	m*)
 		if [[ $cword -eq 2 ]]; then
-			_comp_compgen -C "$PA_DIR/passwords" filedir -df
-			local i
-			for i in "${!COMPREPLY[@]}"; do
-				if [[ ${COMPREPLY[i]} == .git/ ]]; then
-					unset 'COMPREPLY[i]'
-					break
-				fi
-			done
-		fi
-		;;
-	[des]*)
-		if [[ $cword -eq 2 ]]; then
-			_comp_compgen_split -l "$(${words[0]} l 2>/dev/null)"
+			_comp_pa_entries
+		elif [[ $cword -eq 3 ]]; then
+			_comp_pa_categories
 		fi
 		;;
 	g*)
