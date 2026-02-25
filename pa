@@ -3,7 +3,14 @@
 # pa - a simple password manager
 
 pw_add() {
-    if yn "generate a password?"; then
+    # PA_PASSWORD allows non-interactive password injection
+    # for scripting and agent use. Bypasses all prompts.
+    if [ "${PA_PASSWORD+x}" ]; then
+        [ "$PA_PASSWORD" ] ||
+            die "PA_PASSWORD can't be empty"
+
+        pass=$PA_PASSWORD
+    elif yn "generate a password?"; then
         pass=$(rand_chars "${PA_LENGTH:-50}" "${PA_PATTERN:-A-Za-z0-9-_}") ||
             die "couldn't generate a password"
     else
@@ -64,8 +71,17 @@ pw_edit() {
         { $age --decrypt -i "$identities_file" -o "$tmpfile" "./$name.age" ||
             die "couldn't decrypt $name.age"; }
 
-    ${EDITOR:-vi} "$tmpfile" ||
-        die "EDITOR exited non-zero"
+    # PA_PASSWORD allows non-interactive editing for
+    # scripting and agent use. Bypasses EDITOR.
+    if [ "${PA_PASSWORD+x}" ]; then
+        [ "$PA_PASSWORD" ] ||
+            die "PA_PASSWORD can't be empty"
+
+        printf '%s\n' "$PA_PASSWORD" > "$tmpfile"
+    else
+        ${EDITOR:-vi} "$tmpfile" ||
+            die "EDITOR exited non-zero"
+    fi
 
     [ -s "$tmpfile" ] || return
 
@@ -123,6 +139,9 @@ rand_chars() {
 }
 
 yn() {
+    # Auto-confirm in non-interactive mode.
+    [ "${PA_NOCONFIRM+x}" ] && return 0
+
     printf '%s [y/N]: ' "$1"
 
     # Enable raw input to allow for a single byte to be read from
@@ -193,6 +212,8 @@ usage() {
     password length:  export PA_LENGTH=50
     password pattern: export PA_PATTERN=A-Za-z0-9-_
     disable tracking: export PA_NOGIT=
+    skip prompts:     export PA_NOCONFIRM=
+    set password:     export PA_PASSWORD=<value>
 "
     exit 0
 }

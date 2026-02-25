@@ -59,6 +59,67 @@ test" ||
 git -C "$PA_DIR/passwords" log | grep -q "add 'nested/password'" ||
     fail "git log should have line: add 'nested/password'"
 
+# --- PA_NOCONFIRM tests ---
+
+# pa add with PA_NOCONFIRM should auto-generate without prompting
+PA_NOCONFIRM= ./pa add noconfirm-test 2>&1 >/dev/null ||
+    fail "PA_NOCONFIRM pa add should succeed"
+
+test -s "$PA_DIR/passwords/noconfirm-test.age" ||
+    fail "PA_NOCONFIRM pa add should create an encrypted file"
+
+# pa del with PA_NOCONFIRM should skip confirmation
+PA_NOCONFIRM= ./pa del noconfirm-test 2>&1 >/dev/null ||
+    fail "PA_NOCONFIRM pa del should succeed"
+
+test ! -f "$PA_DIR/passwords/noconfirm-test.age" ||
+    fail "PA_NOCONFIRM pa del should actually delete the file"
+
+# --- PA_PASSWORD tests ---
+
+# pa add with PA_PASSWORD should store the exact value
+PA_PASSWORD='hunter2' ./pa add pw-test 2>&1 >/dev/null ||
+    fail "PA_PASSWORD pa add should succeed"
+
+test "$(./pa show pw-test)" = "hunter2" ||
+    fail "PA_PASSWORD pa add should store the exact password"
+
+# pa edit with PA_PASSWORD should overwrite the value
+PA_PASSWORD='hunter3' ./pa edit pw-test 2>&1 >/dev/null ||
+    fail "PA_PASSWORD pa edit should succeed"
+
+test "$(./pa show pw-test)" = "hunter3" ||
+    fail "PA_PASSWORD pa edit should update to the new password"
+
+# pa edit with PA_PASSWORD on a new entry should create it
+PA_PASSWORD='brand-new' ./pa edit pw-new 2>&1 >/dev/null ||
+    fail "PA_PASSWORD pa edit on new entry should succeed"
+
+test "$(./pa show pw-new)" = "brand-new" ||
+    fail "PA_PASSWORD pa edit should create a new entry with the password"
+
+# PA_PASSWORD with empty value should fail
+test "$(PA_PASSWORD='' ./pa add empty-test 2>&1)" = "pa: PA_PASSWORD can't be empty." ||
+    fail "PA_PASSWORD='' should be rejected"
+
+test ! -f "$PA_DIR/passwords/empty-test.age" ||
+    fail "PA_PASSWORD='' should not create a file"
+
+# PA_PASSWORD should take priority over PA_NOCONFIRM
+# (i.e. it should use the password, not auto-generate)
+PA_NOCONFIRM= PA_PASSWORD='specific-val' ./pa add priority-test 2>&1 >/dev/null ||
+    fail "PA_PASSWORD + PA_NOCONFIRM pa add should succeed"
+
+test "$(./pa show priority-test)" = "specific-val" ||
+    fail "PA_PASSWORD should take priority over PA_NOCONFIRM auto-generate"
+
+# git should track PA_PASSWORD and PA_NOCONFIRM operations
+git -C "$PA_DIR/passwords" log | grep -q "add 'pw-test'" ||
+    fail "git log should track PA_PASSWORD adds"
+
+git -C "$PA_DIR/passwords" log | grep -q "edit 'pw-test'" ||
+    fail "git log should track PA_PASSWORD edits"
+
 # print info & exit w/ correct status
 printf "\ntotal failures: %d\n" "$failures"
 test "$failures" -eq 0
