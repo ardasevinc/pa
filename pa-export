@@ -1,0 +1,42 @@
+#!/bin/sh
+#
+# pa-export - export all pa entries as a passphrase-encrypted age file
+#
+# Usage: pa-export [output_file]
+# Output: passphrase-encrypted age file containing all entries as name\tvalue pairs
+#
+# The passphrase is prompted interactively by age.
+# Transfer the output file to another machine and use pa-import to restore.
+
+set -e
+
+PA_DIR="${PA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/pa}"
+age="${PA_AGE:-age}"
+identities_file="$PA_DIR/identities"
+output="${1:-pa-export.age}"
+
+[ -d "$PA_DIR" ] || { echo "error: pa store not found at $PA_DIR" >&2; exit 1; }
+[ -f "$identities_file" ] || { echo "error: no identities file at $identities_file" >&2; exit 1; }
+
+cd "$PA_DIR/passwords"
+
+entries=$(find . -type f -name '*.age' | sed 's|^\./||;s|\.age$||' | sort)
+
+[ "$entries" ] || { echo "error: no entries found in store" >&2; exit 1; }
+
+echo "exporting $(echo "$entries" | wc -l | tr -d ' ') entries..." >&2
+
+tmpfile=$(mktemp)
+trap 'rm -f "$tmpfile"' EXIT
+
+for entry in $entries; do
+    value=$($age --decrypt -i "$identities_file" "./${entry}.age") || {
+        echo "error: couldn't decrypt $entry" >&2
+        exit 1
+    }
+    printf '%s\t%s\n' "$entry" "$value" >> "$tmpfile"
+done
+
+$age --passphrase --output "$output" "$tmpfile"
+
+echo "exported to $output" >&2

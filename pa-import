@@ -1,0 +1,43 @@
+#!/bin/sh
+#
+# pa-import - import pa entries from a passphrase-encrypted age file
+#
+# Usage: pa-import <export_file>
+# Reads a file created by pa-export and adds each entry to the local pa store.
+# Existing entries are skipped unless PA_OVERWRITE is set.
+
+set -e
+
+PA_DIR="${PA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/pa}"
+age="${PA_AGE:-age}"
+input="${1:?usage: pa-import <export_file>}"
+
+[ -f "$input" ] || { echo "error: file not found: $input" >&2; exit 1; }
+
+tmpfile=$(mktemp)
+trap 'rm -f "$tmpfile"' EXIT
+
+$age --decrypt --output "$tmpfile" "$input" || { echo "error: decryption failed" >&2; exit 1; }
+
+imported=0
+skipped=0
+
+while IFS='	' read -r name value; do
+    [ "$name" ] || continue
+
+    if [ -f "$PA_DIR/passwords/${name}.age" ] && [ ! "${PA_OVERWRITE+x}" ]; then
+        echo "skip: $name (exists, set PA_OVERWRITE to overwrite)" >&2
+        skipped=$((skipped + 1))
+        continue
+    fi
+
+    PA_PASSWORD="$value" PA_NOCONFIRM= pa add "$name" >/dev/null 2>&1 || {
+        echo "error: failed to import $name" >&2
+        continue
+    }
+
+    echo "imported: $name" >&2
+    imported=$((imported + 1))
+done < "$tmpfile"
+
+echo "done: $imported imported, $skipped skipped" >&2
