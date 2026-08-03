@@ -21,6 +21,24 @@ type ExportResult struct {
 }
 
 func Export(ctx context.Context, age agecmd.Tool, source *store.Store, recipientsPath, outputPath string) (result ExportResult, resultErr error) {
+	lock, err := source.AcquireLock("export")
+	if err != nil {
+		return result, err
+	}
+	defer func() {
+		resultErr = errors.Join(resultErr, lock.Release())
+	}()
+	return exportLocked(ctx, age, source, recipientsPath, outputPath)
+}
+
+// ExportLocked exports while the caller holds the source store lock. This is
+// used when a higher-level operation must keep another invariant stable through
+// delivery of the resulting encrypted bundle.
+func ExportLocked(ctx context.Context, age agecmd.Tool, source *store.Store, recipientsPath, outputPath string) (result ExportResult, resultErr error) {
+	return exportLocked(ctx, age, source, recipientsPath, outputPath)
+}
+
+func exportLocked(ctx context.Context, age agecmd.Tool, source *store.Store, recipientsPath, outputPath string) (result ExportResult, resultErr error) {
 	outputPath, err := filepath.Abs(outputPath)
 	if err != nil {
 		return result, fmt.Errorf("resolve export path: %w", err)
@@ -36,14 +54,6 @@ func Export(ctx context.Context, age agecmd.Tool, source *store.Store, recipient
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		return result, fmt.Errorf("inspect export output: %w", err)
 	}
-
-	lock, err := source.AcquireLock("export")
-	if err != nil {
-		return result, err
-	}
-	defer func() {
-		resultErr = errors.Join(resultErr, lock.Release())
-	}()
 
 	names, err := source.List()
 	if err != nil {

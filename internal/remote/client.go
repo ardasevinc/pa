@@ -13,8 +13,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/ardasevinc/pa/internal/transfer"
 )
@@ -291,6 +293,12 @@ func ValidateHost(host string) error {
 	if host == "" || strings.HasPrefix(host, "-") {
 		return errors.New("invalid SSH host")
 	}
+	if len(host) > 4096 {
+		return errors.New("SSH host is too long")
+	}
+	if !utf8.ValidString(host) {
+		return errors.New("SSH host is not valid UTF-8")
+	}
 	for _, character := range host {
 		if unicode.IsControl(character) || unicode.IsSpace(character) {
 			return errors.New("SSH host cannot contain whitespace or control characters")
@@ -309,6 +317,11 @@ func ValidateSSHOptions(options []string) error {
 		}
 		name := option[1]
 		if strings.ContainsRune(flagOptions, rune(name)) {
+			for _, clustered := range option[2:] {
+				if !strings.ContainsRune(flagOptions, clustered) {
+					return fmt.Errorf("unsupported clustered SSH option %q", option)
+				}
+			}
 			continue
 		}
 		if !strings.ContainsRune(valueOptions, rune(name)) {
@@ -349,7 +362,7 @@ func formatStderr(stderr string) string {
 	if stderr == "" {
 		return ""
 	}
-	return ": " + stderr
+	return ": " + strconv.QuoteToGraphic(stderr)
 }
 
 func syncDirectory(name string) error {

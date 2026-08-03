@@ -54,7 +54,7 @@ type Registry struct {
 }
 
 func Open(opened *store.Store) (*Registry, error) {
-	root, err := os.OpenRoot(opened.Dir)
+	root, err := opened.OpenRoot(".")
 	if err != nil {
 		return nil, fmt.Errorf("open peer registry root: %w", err)
 	}
@@ -112,6 +112,13 @@ func ValidateRecord(record Record) error {
 	}
 	if err := ValidateFingerprint(record.Fingerprint); err != nil {
 		return err
+	}
+	data, err := json.MarshalIndent(record, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode peer record: %w", err)
+	}
+	if len(data)+1 > maxRecordSize {
+		return errors.New("peer record is too large")
 	}
 	return nil
 }
@@ -189,6 +196,13 @@ func (r *Registry) Add(record Record) (returnErr error) {
 		return fmt.Errorf("publish peer: %w", err)
 	}
 	applied = true
+	if err := r.syncDirectory("peers"); err != nil {
+		return &AppliedError{Operation: "add", Name: record.Name, Err: err}
+	}
+	if err := r.root.Remove(temporary); err != nil {
+		return &AppliedError{Operation: "add", Name: record.Name, Err: fmt.Errorf("remove staged peer: %w", err)}
+	}
+	temporary = ""
 	if err := r.syncDirectory("peers"); err != nil {
 		return &AppliedError{Operation: "add", Name: record.Name, Err: err}
 	}

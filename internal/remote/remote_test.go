@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/ardasevinc/pa/internal/agecmd"
@@ -238,7 +239,16 @@ func TestClientOverSSHProcessBoundary(t *testing.T) {
 	remoteStore.add(t, "remote", []byte("remote"))
 
 	sshShim := filepath.Join(t.TempDir(), "ssh")
-	shim := "#!/bin/sh\nexec \"$PA_TEST_BINARY\" -test.run=TestSSHHelperProcess\n"
+	shim := `#!/bin/sh
+test "$#" -eq 6 || exit 86
+test "$1" = "-o" || exit 87
+test "$2" = "BatchMode=yes" || exit 88
+test "$3" = "-o" || exit 89
+test "$4" = "StrictHostKeyChecking=yes" || exit 90
+test "$5" = "test-host" || exit 91
+test "$6" = "pa-xfer serve" || exit 92
+exec "$PA_TEST_BINARY" -test.run=TestSSHHelperProcess
+`
 	if err := os.WriteFile(sshShim, []byte(shim), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -316,10 +326,24 @@ func TestValidateSSHOptions(t *testing.T) {
 		{"--", "evil.example"},
 		{"-p"},
 		{"-Z"},
+		{"-vF", "config"},
+		{"-vR", "8080:localhost:80"},
 	}
 	for _, options := range invalid {
 		if err := ValidateSSHOptions(options); err == nil {
 			t.Errorf("ValidateSSHOptions(%v) accepted invalid options", options)
+		}
+	}
+}
+
+func TestFormatStderrEscapesTerminalControls(t *testing.T) {
+	actual := formatStderr("bad\x1b]52;c;Y2xpcGJvYXJk\a\rmessage")
+	if strings.ContainsRune(actual, '\x1b') || strings.ContainsRune(actual, '\a') || strings.ContainsRune(actual, '\r') {
+		t.Fatalf("formatStderr() emitted terminal controls: %q", actual)
+	}
+	for _, escaped := range []string{`\x1b`, `\a`, `\r`} {
+		if !strings.Contains(actual, escaped) {
+			t.Errorf("formatStderr() = %q, missing %q", actual, escaped)
 		}
 	}
 }

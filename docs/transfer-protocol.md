@@ -123,10 +123,12 @@ record with the version the operator inspected before mutating it under the
 store lock. Replace is the only operation allowed to overwrite active peer
 trust. Sync never changes the registry.
 
-Named sync loads the record, fetches and fingerprints the live recipient, and
-then re-reads the record immediately before export. A recipient mismatch or a
-concurrent local record change aborts before local password entries are
-decrypted. Pairing and explicit replacement may prompt; sync never does.
+Named sync loads the record, fetches and fingerprints the live recipient, then
+acquires the store lock and re-reads the record before export. It holds that
+trust lease through delivery of the encrypted push bundle. A recipient mismatch
+or an earlier local record change aborts before local password entries are
+decrypted; replace and remove cannot complete while a verified push is in
+flight. Pairing and explicit replacement may prompt; sync never does.
 
 The low-level `sync --host HOST --peer-fingerprint SHA256` path bypasses the
 registry and remains available for recovery from a corrupt or unavailable peer

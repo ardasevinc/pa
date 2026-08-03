@@ -77,6 +77,13 @@ func (s *Store) Close() error {
 	return errors.Join(s.passwordsRoot.Close(), s.root.Close())
 }
 
+// OpenRoot returns a root anchored beneath the already-open store descriptor.
+// It does not resolve the store path again, so path replacement cannot rebind a
+// subsystem to a different directory than the Store itself.
+func (s *Store) OpenRoot(name string) (*os.Root, error) {
+	return s.root.OpenRoot(name)
+}
+
 func (s *Store) List() ([]string, error) {
 	var names []string
 	err := fs.WalkDir(s.passwordsRoot.FS(), ".", func(currentPath string, entry fs.DirEntry, walkErr error) error {

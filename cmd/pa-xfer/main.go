@@ -55,11 +55,13 @@ common options:
 `
 
 func main() {
-	interactive := false
-	if info, err := os.Stdin.Stat(); err == nil {
-		interactive = info.Mode()&os.ModeCharDevice != 0
-	}
+	interactive := isCharacterDevice(os.Stdin) && isCharacterDevice(os.Stderr)
 	os.Exit(runWithInput(context.Background(), os.Args[1:], os.Stdin, interactive, os.Stdout, os.Stderr))
+}
+
+func isCharacterDevice(file *os.File) bool {
+	info, err := file.Stat()
+	return err == nil && info.Mode()&os.ModeCharDevice != 0
 }
 
 func run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int {
@@ -335,7 +337,7 @@ type syncResult struct {
 	Pulled          transfer.ImportResult `json:"pulled"`
 }
 
-func runSync(ctx context.Context, arguments []string, stdout, stderr io.Writer) error {
+func runSync(ctx context.Context, arguments []string, stdout, stderr io.Writer) (returnErr error) {
 	var peerName string
 	if len(arguments) > 0 && !strings.HasPrefix(arguments[0], "-") {
 		peerName = arguments[0]
@@ -404,16 +406,6 @@ func runSync(ctx context.Context, arguments []string, stdout, stderr io.Writer) 
 		}
 		return fmt.Errorf("remote recipient fingerprint mismatch: got %s", peer.Fingerprint)
 	}
-	if registry != nil {
-		current, err := registry.Get(peerName)
-		if err != nil {
-			return fmt.Errorf("recheck peer before export: %w", err)
-		}
-		if current != savedRecord {
-			return fmt.Errorf("peer %q changed while sync was starting; no password data was sent", peerName)
-		}
-	}
-
 	temporaryDirectory, err := os.MkdirTemp("", "pa-sync-*")
 	if err != nil {
 		return err
@@ -424,12 +416,43 @@ func runSync(ctx context.Context, arguments []string, stdout, stderr io.Writer) 
 		return err
 	}
 	pushBundle := filepath.Join(temporaryDirectory, "push.age")
-	if _, err := transfer.Export(ctx, age, local, peerRecipients, pushBundle); err != nil {
+	var syncLock *store.Lock
+	if registry != nil {
+		syncLock, err = local.AcquireLock("sync-peer-" + peerName)
+		if err != nil {
+			return err
+		}
+		defer func() {
+			if syncLock != nil {
+				returnErr = errors.Join(returnErr, syncLock.Release())
+			}
+		}()
+		current, err := registry.Get(peerName)
+		if err != nil {
+			return fmt.Errorf("recheck peer before export: %w", err)
+		}
+		if current != savedRecord {
+			return fmt.Errorf("peer %q changed while sync was starting; no password data was sent", peerName)
+		}
+	}
+
+	export := transfer.Export
+	if syncLock != nil {
+		export = transfer.ExportLocked
+	}
+	if _, err := export(ctx, age, local, peerRecipients, pushBundle); err != nil {
 		return fmt.Errorf("prepare push: %w", err)
 	}
 	pushed, err := client.Push(ctx, pushBundle)
 	if err != nil {
 		return fmt.Errorf("push: %w", err)
+	}
+	if syncLock != nil {
+		lock := syncLock
+		syncLock = nil
+		if err := lock.Release(); err != nil {
+			return &remote.RemoteAppliedError{Result: pushed, Err: fmt.Errorf("release named-sync trust lease: %w", err)}
+		}
 	}
 
 	localRecipients, err := os.ReadFile(local.RecipientsPath)

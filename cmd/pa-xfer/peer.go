@@ -30,6 +30,14 @@ func runPeer(ctx context.Context, arguments []string, input io.Reader, interacti
 	if len(arguments) == 0 || strings.HasPrefix(arguments[0], "-") {
 		return runPeerProbe(ctx, arguments, stdout, stderr)
 	}
+	if len(arguments) == 2 && (arguments[1] == "--help" || arguments[1] == "-h") {
+		if usage, ok := peerCommandUsage(arguments[0]); ok {
+			if _, err := fmt.Fprintln(stdout, usage); err != nil {
+				return err
+			}
+			return flag.ErrHelp
+		}
+	}
 	switch arguments[0] {
 	case "add":
 		return runPeerAdd(ctx, arguments[1:], input, interactive, stdout, stderr)
@@ -46,6 +54,17 @@ func runPeer(ctx context.Context, arguments []string, input io.Reader, interacti
 	default:
 		return fmt.Errorf("unknown peer command %q", arguments[0])
 	}
+}
+
+func peerCommandUsage(command string) (string, bool) {
+	usage := map[string]string{
+		"add":     "usage: pa-xfer peer add NAME [--host HOST] [--fingerprint SHA256] [--ssh PATH] [--store DIR] [--json]",
+		"show":    "usage: pa-xfer peer show NAME [--store DIR] [--json]",
+		"replace": "usage: pa-xfer peer replace NAME [--host HOST] [--fingerprint SHA256] [--ssh PATH] [--store DIR] [--json]",
+		"remove":  "usage: pa-xfer peer remove NAME [--yes] [--store DIR] [--json]",
+	}
+	value, ok := usage[command]
+	return value, ok
 }
 
 func runPeerAdd(ctx context.Context, arguments []string, input io.Reader, interactive bool, stdout, stderr io.Writer) error {
@@ -91,10 +110,10 @@ func runPeerAdd(ctx context.Context, arguments []string, input io.Reader, intera
 		return err
 	}
 	if common.json {
-		return writeJSON(stdout, record)
+		return peerMutationOutput("add", name, writeJSON(stdout, record))
 	}
-	fmt.Fprintf(stdout, "saved peer %q\n", name)
-	return nil
+	_, err = fmt.Fprintf(stdout, "saved peer %q\n", name)
+	return peerMutationOutput("add", name, err)
 }
 
 func runPeerList(arguments []string, stdout, stderr io.Writer) error {
@@ -124,7 +143,9 @@ func runPeerList(arguments []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	for _, record := range records {
-		fmt.Fprintf(stdout, "%s\t%s\t%s\n", record.Name, record.Host, record.Fingerprint)
+		if _, err := fmt.Fprintf(stdout, "%s\t%s\t%s\n", record.Name, record.Host, record.Fingerprint); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -200,8 +221,8 @@ func runPeerReplace(ctx context.Context, arguments []string, input io.Reader, in
 		if common.json {
 			return writeJSON(stdout, replacement)
 		}
-		fmt.Fprintf(stdout, "peer %q is unchanged\n", name)
-		return nil
+		_, err = fmt.Fprintf(stdout, "peer %q is unchanged\n", name)
+		return err
 	}
 	if err := authorizePeer("replace", replacement, &current, fingerprint, input, interactive, common.json, stderr); err != nil {
 		return err
@@ -210,10 +231,10 @@ func runPeerReplace(ctx context.Context, arguments []string, input io.Reader, in
 		return err
 	}
 	if common.json {
-		return writeJSON(stdout, replacement)
+		return peerMutationOutput("replace", name, writeJSON(stdout, replacement))
 	}
-	fmt.Fprintf(stdout, "replaced peer %q\n", name)
-	return nil
+	_, err = fmt.Fprintf(stdout, "replaced peer %q\n", name)
+	return peerMutationOutput("replace", name, err)
 }
 
 func runPeerRemove(arguments []string, input io.Reader, interactive bool, stdout, stderr io.Writer) error {
@@ -245,7 +266,9 @@ func runPeerRemove(arguments []string, input io.Reader, interactive bool, stdout
 		if common.json || !interactive {
 			return errors.New("peer remove requires --yes outside an interactive terminal")
 		}
-		fmt.Fprintf(stderr, "remove peer %q?\n\nhost: %s\nfingerprint: %s\n\ntype %q to confirm: ", name, record.Host, record.Fingerprint, "remove "+name)
+		if _, err := fmt.Fprintf(stderr, "remove peer %q?\n\nhost: %s\nfingerprint: %s\n\ntype %q to confirm: ", name, record.Host, record.Fingerprint, "remove "+name); err != nil {
+			return fmt.Errorf("write confirmation prompt: %w", err)
+		}
 		if err := readConfirmation(input, "remove "+name); err != nil {
 			return err
 		}
@@ -254,12 +277,12 @@ func runPeerRemove(arguments []string, input io.Reader, interactive bool, stdout
 		return err
 	}
 	if common.json {
-		return writeJSON(stdout, struct {
+		return peerMutationOutput("remove", name, writeJSON(stdout, struct {
 			Removed peerregistry.Record `json:"removed"`
-		}{Removed: record})
+		}{Removed: record}))
 	}
-	fmt.Fprintf(stdout, "removed peer %q\n", name)
-	return nil
+	_, err = fmt.Fprintf(stdout, "removed peer %q\n", name)
+	return peerMutationOutput("remove", name, err)
 }
 
 func peerNameArgument(command string, arguments []string) (string, []string, error) {
@@ -295,11 +318,17 @@ func authorizePeer(action string, record peerregistry.Record, previous *peerregi
 	if jsonOutput || !interactive {
 		return fmt.Errorf("peer %s requires --fingerprint outside an interactive terminal", action)
 	}
-	fmt.Fprintf(stderr, "%s peer %q\n\nhost: %s\n", action, record.Name, record.Host)
-	if previous != nil {
-		fmt.Fprintf(stderr, "old fingerprint: %s\n", previous.Fingerprint)
+	if _, err := fmt.Fprintf(stderr, "%s peer %q\n\nhost: %s\n", action, record.Name, record.Host); err != nil {
+		return fmt.Errorf("write confirmation prompt: %w", err)
 	}
-	fmt.Fprintf(stderr, "new fingerprint: %s\n\nverify this on the peer with `pa-xfer recipient`\ntype %q to confirm: ", record.Fingerprint, action+" "+record.Name)
+	if previous != nil {
+		if _, err := fmt.Fprintf(stderr, "old fingerprint: %s\n", previous.Fingerprint); err != nil {
+			return fmt.Errorf("write confirmation prompt: %w", err)
+		}
+	}
+	if _, err := fmt.Fprintf(stderr, "new fingerprint: %s\n\nverify this on the peer with `pa-xfer recipient`\ntype %q to confirm: ", record.Fingerprint, action+" "+record.Name); err != nil {
+		return fmt.Errorf("write confirmation prompt: %w", err)
+	}
 	return readConfirmation(input, action+" "+record.Name)
 }
 
@@ -336,6 +365,13 @@ func writePeer(output io.Writer, record peerregistry.Record, jsonOutput bool) er
 	if jsonOutput {
 		return writeJSON(output, record)
 	}
-	fmt.Fprintf(output, "name: %s\nhost: %s\nfingerprint: %s\nversion: %d\n", record.Name, record.Host, record.Fingerprint, record.Version)
-	return nil
+	_, err := fmt.Fprintf(output, "name: %s\nhost: %s\nfingerprint: %s\nversion: %d\n", record.Name, record.Host, record.Fingerprint, record.Version)
+	return err
+}
+
+func peerMutationOutput(operation, name string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return &peerregistry.AppliedError{Operation: operation, Name: name, Err: fmt.Errorf("write result: %w", err)}
 }

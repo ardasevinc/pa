@@ -10,8 +10,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ardasevinc/pa/internal/agecmd"
 	"github.com/ardasevinc/pa/internal/peerregistry"
@@ -82,6 +84,28 @@ func TestPeerCLIHelperProcess(t *testing.T) {
 		_, writeErr := file.WriteString("1\n")
 		if err := errors.Join(writeErr, file.Close()); err != nil {
 			os.Exit(89)
+		}
+		data, err := os.ReadFile(countPath)
+		if err != nil {
+			os.Exit(92)
+		}
+		count := bytes.Count(data, []byte("\n"))
+		blockAt, _ := strconv.Atoi(os.Getenv("PA_TEST_BLOCK_SSH_AT"))
+		if blockAt == count {
+			signal := os.Getenv("PA_TEST_BLOCK_SIGNAL")
+			release := os.Getenv("PA_TEST_BLOCK_RELEASE")
+			if err := os.WriteFile(signal, []byte("blocked\n"), 0o600); err != nil {
+				os.Exit(93)
+			}
+			deadline := time.Now().Add(10 * time.Second)
+			for {
+				if _, err := os.Stat(release); err == nil {
+					break
+				} else if !errors.Is(err, os.ErrNotExist) || time.Now().After(deadline) {
+					os.Exit(94)
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
 		}
 	}
 	age, err := agecmd.Find("")
@@ -308,6 +332,99 @@ func TestNamedPeerMismatchAndUnknownAbortBeforePush(t *testing.T) {
 	}
 }
 
+func TestNamedPeerSyncHoldsTrustLeaseThroughPush(t *testing.T) {
+	fixture := newPeerCLIFixture(t, true)
+	writePeerEntry(t, fixture.age, fixture.local, "local-only", []byte("secret"))
+	fingerprint := peerStoreFingerprint(t, fixture.remote)
+	addPeerForTest(t, fixture, fingerprint)
+
+	control := t.TempDir()
+	countPath := filepath.Join(control, "count")
+	signalPath := filepath.Join(control, "blocked")
+	releasePath := filepath.Join(control, "release")
+	t.Setenv("PA_TEST_SSH_COUNT", countPath)
+	t.Setenv("PA_TEST_BLOCK_SSH_AT", "2")
+	t.Setenv("PA_TEST_BLOCK_SIGNAL", signalPath)
+	t.Setenv("PA_TEST_BLOCK_RELEASE", releasePath)
+
+	type outcome struct {
+		code           int
+		stdout, stderr string
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		code, stdout, stderr := runPeerCLI(t, []string{
+			"sync", "devbox", "--store", fixture.local, "--ssh", fixture.ssh,
+		}, "", false)
+		done <- outcome{code: code, stdout: stdout, stderr: stderr}
+	}()
+	waitForFile(t, signalPath)
+
+	opened, err := store.Open(fixture.local)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry, err := peerregistry.Open(opened)
+	if err != nil {
+		t.Fatal(err)
+	}
+	current, err := registry.Get("devbox")
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacement := current
+	replacement.Host = "replacement-host"
+	if err := registry.Replace(current, replacement); !errors.Is(err, store.ErrLocked) {
+		t.Fatalf("Replace() during named push error = %v, want ErrLocked", err)
+	}
+	if err := errors.Join(registry.Close(), opened.Close()); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(releasePath, []byte("release\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case result := <-done:
+		if result.code != 0 {
+			t.Fatalf("named sync code = %d, stdout = %q, stderr = %q", result.code, result.stdout, result.stderr)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("named sync did not finish after releasing SSH shim")
+	}
+	if actual := readPeerRecord(t, fixture.local, "devbox"); actual != current {
+		t.Fatalf("failed concurrent replacement changed peer to %+v", actual)
+	}
+}
+
+type failedWriter struct{}
+
+func (failedWriter) Write([]byte) (int, error) { return 0, errors.New("writer failed") }
+
+func TestPeerAuthorizationRequiresVisiblePrompt(t *testing.T) {
+	record := peerregistry.Record{Version: peerregistry.Version, Name: "devbox", Host: "host", Fingerprint: peerCLITestFingerprint}
+	err := authorizePeer("add", record, nil, "", strings.NewReader("add devbox\n"), true, false, failedWriter{})
+	if err == nil || !strings.Contains(err.Error(), "write confirmation prompt") {
+		t.Fatalf("authorizePeer() error = %v", err)
+	}
+}
+
+func TestPeerMutationOutputFailureReportsApplied(t *testing.T) {
+	fixture := newPeerCLIFixture(t, false)
+	fingerprint := peerStoreFingerprint(t, fixture.remote)
+	err := runPeerAdd(t.Context(), []string{
+		"devbox", "--host", "test-host", "--ssh", fixture.ssh,
+		"--fingerprint", fingerprint, "--store", fixture.local,
+	}, strings.NewReader(""), false, failedWriter{}, io.Discard)
+	var applied *peerregistry.AppliedError
+	if !errors.As(err, &applied) {
+		t.Fatalf("runPeerAdd() error = %v, want AppliedError", err)
+	}
+	if actual := readPeerRecord(t, fixture.local, "devbox"); actual.Fingerprint != fingerprint {
+		t.Fatalf("applied add record = %+v", actual)
+	}
+}
+
 func TestSavedAndLowLevelSyncArgumentsCannotMix(t *testing.T) {
 	for _, arguments := range [][]string{
 		{"sync", "devbox", "--host", "evil.example"},
@@ -326,6 +443,19 @@ func runPeerCLI(t *testing.T, arguments []string, input string, interactive bool
 	var stdout, stderr bytes.Buffer
 	code := runWithInput(t.Context(), arguments, strings.NewReader(input), interactive, &stdout, &stderr)
 	return code, stdout.String(), stderr.String()
+}
+
+func waitForFile(t *testing.T, name string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if _, err := os.Stat(name); err == nil {
+			return
+		} else if !errors.Is(err, os.ErrNotExist) || time.Now().After(deadline) {
+			t.Fatalf("wait for %s: %v", name, err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 func addPeerForTest(t *testing.T, fixture *peerCLIFixture, fingerprint string) {

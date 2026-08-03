@@ -163,12 +163,56 @@ func TestValidationRejectsUnsafeRecords(t *testing.T) {
 		{Version: Version, Name: "list", Host: valid.Host, Fingerprint: valid.Fingerprint},
 		{Version: Version, Name: valid.Name, Host: "-oProxyCommand=evil", Fingerprint: valid.Fingerprint},
 		{Version: Version, Name: valid.Name, Host: "space host", Fingerprint: valid.Fingerprint},
+		{Version: Version, Name: valid.Name, Host: strings.Repeat("a", 4097), Fingerprint: valid.Fingerprint},
+		{Version: Version, Name: valid.Name, Host: string([]byte{0xff}), Fingerprint: valid.Fingerprint},
 		{Version: Version, Name: valid.Name, Host: valid.Host, Fingerprint: strings.ToUpper(valid.Fingerprint)},
 	}
 	for _, record := range tests {
 		if err := ValidateRecord(record); err == nil {
 			t.Errorf("ValidateRecord(%+v) succeeded", record)
 		}
+	}
+}
+
+func TestRegistryStaysAnchoredWhenStorePathIsRetargeted(t *testing.T) {
+	first := newRegistryFixture(t)
+	second := newRegistryFixture(t)
+	firstRecord := testRecord("devbox", "first.example")
+	secondRecord := testRecord("devbox", "second.example")
+	if err := first.registry.Add(firstRecord); err != nil {
+		t.Fatal(err)
+	}
+	if err := second.registry.Add(secondRecord); err != nil {
+		t.Fatal(err)
+	}
+
+	link := filepath.Join(t.TempDir(), "store")
+	if err := os.Symlink(first.directory, link); err != nil {
+		t.Fatal(err)
+	}
+	opened, err := store.Open(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = opened.Close() })
+	if err := os.Remove(link); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(second.directory, link); err != nil {
+		t.Fatal(err)
+	}
+
+	registry, err := Open(opened)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = registry.Close() })
+	actual, err := registry.Get("devbox")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if actual != firstRecord {
+		t.Fatalf("retargeted store registry = %+v, want %+v", actual, firstRecord)
 	}
 }
 
