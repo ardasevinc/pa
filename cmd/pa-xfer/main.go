@@ -32,6 +32,7 @@ const usageText = `usage:
   pa-xfer peer replace NAME [options]
   pa-xfer peer remove NAME [options]
   pa-xfer peer probe --host HOST [options]
+  pa-xfer peer --host HOST [options]
   pa-xfer sync PEER [options]
   pa-xfer sync --host HOST --peer-fingerprint SHA256 [options]
   pa-xfer backups [options]
@@ -393,7 +394,11 @@ func runSync(ctx context.Context, arguments []string, stdout, stderr io.Writer) 
 	if err != nil {
 		return err
 	}
-	if peer.Fingerprint != pinnedFingerprint {
+	fingerprintMatches := peer.Fingerprint == pinnedFingerprint
+	if peerName == "" {
+		fingerprintMatches = strings.EqualFold(peer.Fingerprint, pinnedFingerprint)
+	}
+	if !fingerprintMatches {
 		if peerName != "" {
 			return fmt.Errorf("peer %q recipient fingerprint changed\nstored: %s\nobserved: %s\nno password data was sent; verify the peer, then run `pa-xfer peer replace %s`", peerName, pinnedFingerprint, peer.Fingerprint, peerName)
 		}
@@ -436,7 +441,10 @@ func runSync(ctx context.Context, arguments []string, stdout, stderr io.Writer) 
 		return fmt.Errorf("pull: %w", err)
 	}
 	pulled, err := transfer.Import(ctx, age, local, pullBundle)
-	result := syncResult{PeerName: peerName, PeerHost: client.Host, PeerFingerprint: peer.Fingerprint, Pushed: pushed, Pulled: pulled}
+	result := syncResult{PeerName: peerName, PeerFingerprint: peer.Fingerprint, Pushed: pushed, Pulled: pulled}
+	if peerName != "" {
+		result.PeerHost = client.Host
+	}
 	if common.json {
 		if jsonErr := writeJSON(stdout, result); jsonErr != nil {
 			return errors.Join(err, jsonErr)

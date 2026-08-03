@@ -260,6 +260,14 @@ func TestNamedPeerSyncEndToEndAndRepeat(t *testing.T) {
 	if code != 0 || !strings.Contains(stdout, `"imported":0`) || !strings.Contains(stdout, `"skipped":2`) {
 		t.Fatalf("repeat sync = code %d, stdout %q, stderr %q", code, stdout, stderr)
 	}
+
+	code, stdout, stderr = runPeerCLI(t, []string{
+		"sync", "--host", "test-host", "--peer-fingerprint", strings.ToUpper(peerStoreFingerprint(t, fixture.remote)),
+		"--store", fixture.local, "--ssh", fixture.ssh, "--json",
+	}, "", false)
+	if code != 0 || strings.Contains(stdout, `"peer_name"`) || !strings.Contains(stdout, `"imported":0`) {
+		t.Fatalf("low-level compatibility sync = code %d, stdout %q, stderr %q", code, stdout, stderr)
+	}
 }
 
 func TestNamedPeerMismatchAndUnknownAbortBeforePush(t *testing.T) {
