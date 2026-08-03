@@ -8,14 +8,24 @@ fail() {
     failures=$((failures + 1))
 }
 
-export PA_DIR=/tmp/pa-test
+test_root=$(mktemp -d "${TMPDIR:-/tmp}/pa-test.XXXXXXXX") || exit 1
+case $test_root in
+*/pa-test.*) ;;
+*) printf '%s\n' "refusing unsafe test directory: $test_root" >&2; exit 1 ;;
+esac
 
-# clean up previous run
-# (the previous state is left around
-# intentionally, in case the dev
-# wants to poke around)
-# that's why we don't clean up on exit
-rm -rf /tmp/pa-test
+cleanup() {
+    if [ "${PA_TEST_KEEP:-}" ]; then
+        printf '%s\n' "test store kept at $test_root"
+    else
+        rm -rf "$test_root"
+    fi
+}
+
+trap cleanup 0
+trap 'exit 130' HUP INT TERM
+
+export PA_DIR="$test_root/store"
 
 # pa welcomes you
 ./pa | grep -q "a simple password manager" ||
@@ -36,7 +46,7 @@ test -d "$PA_DIR/passwords/.git" ||
 # TODO: ensure git author/email are set correctly, etc
 
 # pa add
-printf 'y' | ./pa add test 2>&1 >/dev/null ||
+printf 'y' | ./pa add test >/dev/null 2>&1 ||
     fail "pa add should be capable of adding a test password"
 
 test "$(printf y | ./pa add nested/password 2>&1)" = "\
@@ -65,6 +75,19 @@ test -f "$PA_DIR/passwords/test.age" &&
 test -s "$PA_DIR/passwords/another/nested password.age" ||
     fail "pa mv should have created a new password file"
 
+# editing without changing the temporary file should be a no-op
+before_commit=$(git -C "$PA_DIR/passwords" rev-parse HEAD)
+before_blob=$(git -C "$PA_DIR/passwords" hash-object nested/password.age)
+
+EDITOR=: ./pa edit nested/password >/dev/null 2>&1 ||
+    fail "an unchanged edit should succeed"
+
+test "$(git -C "$PA_DIR/passwords" rev-parse HEAD)" = "$before_commit" ||
+    fail "an unchanged edit should not create a commit"
+
+test "$(git -C "$PA_DIR/passwords" hash-object nested/password.age)" = "$before_blob" ||
+    fail "an unchanged edit should preserve ciphertext"
+
 # ensure git commits are working
 git -C "$PA_DIR/passwords" log | grep -q "add 'nested/password'" ||
     fail "git log should have line: add 'nested/password'"
@@ -72,14 +95,14 @@ git -C "$PA_DIR/passwords" log | grep -q "add 'nested/password'" ||
 # --- PA_NOCONFIRM tests ---
 
 # pa add with PA_NOCONFIRM should auto-generate without prompting
-PA_NOCONFIRM= ./pa add noconfirm-test 2>&1 >/dev/null ||
+PA_NOCONFIRM='' ./pa add noconfirm-test >/dev/null 2>&1 ||
     fail "PA_NOCONFIRM pa add should succeed"
 
 test -s "$PA_DIR/passwords/noconfirm-test.age" ||
     fail "PA_NOCONFIRM pa add should create an encrypted file"
 
 # pa del with PA_NOCONFIRM should skip confirmation
-PA_NOCONFIRM= ./pa del noconfirm-test 2>&1 >/dev/null ||
+PA_NOCONFIRM='' ./pa del noconfirm-test >/dev/null 2>&1 ||
     fail "PA_NOCONFIRM pa del should succeed"
 
 test ! -f "$PA_DIR/passwords/noconfirm-test.age" ||
@@ -88,21 +111,21 @@ test ! -f "$PA_DIR/passwords/noconfirm-test.age" ||
 # --- PA_PASSWORD tests ---
 
 # pa add with PA_PASSWORD should store the exact value
-PA_PASSWORD='hunter2' ./pa add pw-test 2>&1 >/dev/null ||
+PA_PASSWORD='hunter2' ./pa add pw-test >/dev/null 2>&1 ||
     fail "PA_PASSWORD pa add should succeed"
 
 test "$(./pa show pw-test)" = "hunter2" ||
     fail "PA_PASSWORD pa add should store the exact password"
 
 # pa edit with PA_PASSWORD should overwrite the value
-PA_PASSWORD='hunter3' ./pa edit pw-test 2>&1 >/dev/null ||
+PA_PASSWORD='hunter3' ./pa edit pw-test >/dev/null 2>&1 ||
     fail "PA_PASSWORD pa edit should succeed"
 
 test "$(./pa show pw-test)" = "hunter3" ||
     fail "PA_PASSWORD pa edit should update to the new password"
 
 # pa edit with PA_PASSWORD on a new entry should create it
-PA_PASSWORD='brand-new' ./pa edit pw-new 2>&1 >/dev/null ||
+PA_PASSWORD='brand-new' ./pa edit pw-new >/dev/null 2>&1 ||
     fail "PA_PASSWORD pa edit on new entry should succeed"
 
 test "$(./pa show pw-new)" = "brand-new" ||
@@ -117,7 +140,7 @@ test ! -f "$PA_DIR/passwords/empty-test.age" ||
 
 # PA_PASSWORD should take priority over PA_NOCONFIRM
 # (i.e. it should use the password, not auto-generate)
-PA_NOCONFIRM= PA_PASSWORD='specific-val' ./pa add priority-test 2>&1 >/dev/null ||
+PA_NOCONFIRM='' PA_PASSWORD='specific-val' ./pa add priority-test >/dev/null 2>&1 ||
     fail "PA_PASSWORD + PA_NOCONFIRM pa add should succeed"
 
 test "$(./pa show priority-test)" = "specific-val" ||
