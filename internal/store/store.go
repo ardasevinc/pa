@@ -294,6 +294,24 @@ func (s *Store) Commit(names []string, message string) error {
 	return nil
 }
 
+func (s *Store) WriteReceipt(transactionID string, data []byte) (string, error) {
+	if err := validateInternalID(transactionID); err != nil {
+		return "", err
+	}
+	directory := path.Join("backups", transactionID)
+	if err := s.root.MkdirAll(directory, 0o700); err != nil {
+		return "", fmt.Errorf("create receipt directory: %w", err)
+	}
+	receiptPath := path.Join(directory, "receipt.json")
+	if err := writeNewSyncedFile(s.root, receiptPath, data, 0o600); err != nil {
+		return "", fmt.Errorf("write receipt: %w", err)
+	}
+	if err := s.syncDirectory(directory); err != nil {
+		return "", err
+	}
+	return filepath.Join(s.Dir, filepath.FromSlash(receiptPath)), nil
+}
+
 func (s *Store) syncDirectory(relativePath string) error {
 	directory, err := s.root.Open(relativePath)
 	if err != nil {
@@ -373,6 +391,17 @@ type Transaction struct {
 	store    *Store
 	id       string
 	rootPath string
+}
+
+func (t *Transaction) WriteJournal(data []byte) (string, error) {
+	journalPath := path.Join(t.rootPath, "journal.json")
+	if err := writeNewSyncedFile(t.store.root, journalPath, data, 0o600); err != nil {
+		return "", fmt.Errorf("write transaction journal: %w", err)
+	}
+	if err := t.store.syncDirectory(t.rootPath); err != nil {
+		return "", err
+	}
+	return filepath.Join(t.store.Dir, filepath.FromSlash(journalPath)), nil
 }
 
 func (t *Transaction) StagePath(name string) (relativePath, absolutePath string, err error) {
@@ -495,4 +524,15 @@ func hostname() string {
 		return "unknown"
 	}
 	return name
+}
+
+func writeNewSyncedFile(root *os.Root, name string, data []byte, mode fs.FileMode) error {
+	file, err := root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
+	if err != nil {
+		return err
+	}
+	_, writeErr := file.Write(data)
+	syncErr := file.Sync()
+	closeErr := file.Close()
+	return errors.Join(writeErr, syncErr, closeErr)
 }
