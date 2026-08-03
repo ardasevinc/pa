@@ -307,8 +307,8 @@ func TestValidateSSHOptions(t *testing.T) {
 		{"-J", "jump@example", "-vv"},
 	}
 	for _, options := range valid {
-		if err := validateSSHOptions(options); err != nil {
-			t.Errorf("validateSSHOptions(%v) = %v", options, err)
+		if err := ValidateSSHOptions(options); err != nil {
+			t.Errorf("ValidateSSHOptions(%v) = %v", options, err)
 		}
 	}
 	invalid := [][]string{
@@ -318,8 +318,8 @@ func TestValidateSSHOptions(t *testing.T) {
 		{"-Z"},
 	}
 	for _, options := range invalid {
-		if err := validateSSHOptions(options); err == nil {
-			t.Errorf("validateSSHOptions(%v) accepted invalid options", options)
+		if err := ValidateSSHOptions(options); err == nil {
+			t.Errorf("ValidateSSHOptions(%v) accepted invalid options", options)
 		}
 	}
 }

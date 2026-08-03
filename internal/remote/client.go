@@ -201,10 +201,10 @@ type sshSession struct {
 }
 
 func (c Client) start(ctx context.Context) (*sshSession, error) {
-	if err := validateHost(c.Host); err != nil {
+	if err := ValidateHost(c.Host); err != nil {
 		return nil, err
 	}
-	if err := validateSSHOptions(c.SSHOptions); err != nil {
+	if err := ValidateSSHOptions(c.SSHOptions); err != nil {
 		return nil, err
 	}
 	sshPath := c.SSHPath
@@ -287,7 +287,7 @@ func errorFromEnvelope(status byte, envelope importEnvelope) error {
 	return fmt.Errorf("remote import failed: %w", err)
 }
 
-func validateHost(host string) error {
+func ValidateHost(host string) error {
 	if host == "" || strings.HasPrefix(host, "-") {
 		return errors.New("invalid SSH host")
 	}
@@ -299,7 +299,7 @@ func validateHost(host string) error {
 	return nil
 }
 
-func validateSSHOptions(options []string) error {
+func ValidateSSHOptions(options []string) error {
 	valueOptions := "BbCcDEeFIiJLlmOoPpQRSwW"
 	flagOptions := "46AaCfGgKkMNnqTtVvXxYy"
 	for index := 0; index < len(options); index++ {
