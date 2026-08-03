@@ -10,8 +10,13 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/ardasevinc/pa/internal/agecmd"
 	"github.com/ardasevinc/pa/internal/peerregistry"
@@ -56,7 +61,9 @@ common options:
 
 func main() {
 	interactive := isCharacterDevice(os.Stdin) && isCharacterDevice(os.Stderr)
-	os.Exit(runWithInput(context.Background(), os.Args[1:], os.Stdin, interactive, os.Stdout, os.Stderr))
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	os.Exit(runWithInput(ctx, os.Args[1:], os.Stdin, interactive, os.Stdout, os.Stderr))
 }
 
 func isCharacterDevice(file *os.File) bool {
@@ -324,14 +331,39 @@ func runPeerProbe(ctx context.Context, arguments []string, stdout, stderr io.Wri
 			Recipients  string `json:"recipients"`
 		}{Fingerprint: peer.Fingerprint, Recipients: string(peer.Recipients)})
 	}
-	if _, err := stdout.Write(peer.Recipients); err != nil {
+	safeRecipients := terminalSafeText(peer.Recipients)
+	if _, err := io.WriteString(stdout, safeRecipients); err != nil {
 		return err
 	}
-	if len(peer.Recipients) > 0 && peer.Recipients[len(peer.Recipients)-1] != '\n' {
-		_, _ = io.WriteString(stdout, "\n")
+	if len(safeRecipients) > 0 && safeRecipients[len(safeRecipients)-1] != '\n' {
+		if _, err := io.WriteString(stdout, "\n"); err != nil {
+			return err
+		}
 	}
-	fmt.Fprintf(stdout, "fingerprint %s\n", peer.Fingerprint)
-	return nil
+	_, err = fmt.Fprintf(stdout, "fingerprint %s\n", peer.Fingerprint)
+	return err
+}
+
+func terminalSafeText(data []byte) string {
+	var result strings.Builder
+	for len(data) > 0 {
+		r, size := utf8.DecodeRune(data)
+		if r == utf8.RuneError && size == 1 {
+			fmt.Fprintf(&result, "\\x%02x", data[0])
+			data = data[1:]
+			continue
+		}
+		if r == '\n' {
+			result.WriteRune(r)
+		} else if unicode.IsControl(r) {
+			quoted := strconv.QuoteRuneToGraphic(r)
+			result.WriteString(strings.TrimSuffix(strings.TrimPrefix(quoted, "'"), "'"))
+		} else {
+			result.WriteRune(r)
+		}
+		data = data[size:]
+	}
+	return result.String()
 }
 
 type syncResult struct {

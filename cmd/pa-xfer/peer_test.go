@@ -15,6 +15,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/ardasevinc/pa/internal/agecmd"
 	"github.com/ardasevinc/pa/internal/peerregistry"
@@ -411,6 +412,73 @@ func TestNamedPeerSyncHoldsTrustLeaseThroughPush(t *testing.T) {
 	}
 }
 
+func TestNamedPeerCancellationReleasesTrustLease(t *testing.T) {
+	fixture := newPeerCLIFixture(t, true)
+	writePeerEntry(t, fixture.age, fixture.local, "local-only", []byte("secret"))
+	fingerprint := peerStoreFingerprint(t, fixture.remote)
+	addPeerForTest(t, fixture, fingerprint)
+
+	control := t.TempDir()
+	countPath := filepath.Join(control, "count")
+	signalPath := filepath.Join(control, "blocked")
+	releasePath := filepath.Join(control, "release")
+	t.Setenv("PA_TEST_SSH_COUNT", countPath)
+	t.Setenv("PA_TEST_BLOCK_SSH_AT", "2")
+	t.Setenv("PA_TEST_BLOCK_SIGNAL", signalPath)
+	t.Setenv("PA_TEST_BLOCK_RELEASE", releasePath)
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan int, 1)
+	go func() {
+		var stdout, stderr bytes.Buffer
+		done <- runWithInput(ctx, []string{
+			"sync", "devbox", "--store", fixture.local, "--ssh", fixture.ssh,
+		}, strings.NewReader(""), false, &stdout, &stderr)
+	}()
+	waitForFile(t, signalPath)
+	cancel()
+	select {
+	case code := <-done:
+		if code == 0 {
+			t.Fatal("cancelled named sync succeeded")
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("cancelled named sync did not finish")
+	}
+
+	opened, err := store.Open(fixture.local)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry, err := peerregistry.Open(opened)
+	if err != nil {
+		t.Fatal(err)
+	}
+	current, err := registry.Get("devbox")
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacement := current
+	replacement.Host = "replacement-host"
+	if err := registry.Replace(current, replacement); err != nil {
+		t.Fatalf("Replace() after cancellation: %v", err)
+	}
+	if err := errors.Join(registry.Close(), opened.Close()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestTerminalSafeTextEscapesPeerControls(t *testing.T) {
+	actual := terminalSafeText([]byte("recipient\n\x1b]52;c;Y2xpcGJvYXJk\a\xff"))
+	if strings.ContainsRune(actual, '\x1b') || strings.ContainsRune(actual, '\a') || strings.ContainsRune(actual, utf8.RuneError) {
+		t.Fatalf("terminalSafeText() emitted unsafe text: %q", actual)
+	}
+	for _, escaped := range []string{`\x1b`, `\a`, `\xff`} {
+		if !strings.Contains(actual, escaped) {
+			t.Errorf("terminalSafeText() = %q, missing %q", actual, escaped)
+		}
+	}
+}
+
 func TestNamedPeerChangeAfterProbeAbortsBeforeDecrypt(t *testing.T) {
 	fixture := newPeerCLIFixture(t, true)
 	writePeerEntry(t, fixture.age, fixture.local, "local-only", []byte("secret"))
@@ -647,9 +715,9 @@ func writePeerEntry(t *testing.T, age agecmd.Tool, directory, name string, value
 	if err := opened.Close(); err != nil {
 		t.Fatal(err)
 	}
-	relative, _ := filepath.Rel(filepath.Join(directory, "passwords"), entryPath)
-	runPeerCommand(t, "git", "-C", filepath.Join(directory, "passwords"), "add", relative)
-	runPeerCommand(t, "git", "-C", filepath.Join(directory, "passwords"), "commit", "-qm", "add "+name)
+	relative, _ := filepath.Rel(opened.PasswordsDir, entryPath)
+	runPeerCommand(t, "git", "-C", opened.PasswordsDir, "add", relative)
+	runPeerCommand(t, "git", "-C", opened.PasswordsDir, "commit", "-qm", "add "+name)
 }
 
 func readPeerEntry(t *testing.T, age agecmd.Tool, directory, name string) []byte {

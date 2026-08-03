@@ -116,7 +116,11 @@ func (c Client) Push(ctx context.Context, bundlePath string) (transfer.ImportRes
 		return transfer.ImportResult{}, session.abort(err)
 	}
 	remoteErr := errorFromEnvelope(status, envelope)
-	return envelope.Result, session.finish(remoteErr)
+	finishErr := session.finish(remoteErr)
+	if finishErr != nil && (envelope.Result.Imported > 0 || envelope.Result.Partial) {
+		return envelope.Result, &RemoteAppliedError{Result: envelope.Result, Err: finishErr}
+	}
+	return envelope.Result, finishErr
 }
 
 func (c Client) Pull(ctx context.Context, recipients []byte, outputPath string) error {
@@ -275,14 +279,14 @@ func readRemoteError(input io.Reader, status byte) error {
 	if err != nil {
 		return err
 	}
-	return fmt.Errorf("remote error (status %d): %s", status, message)
+	return fmt.Errorf("remote error (status %d): %s", status, strconv.QuoteToGraphic(string(message)))
 }
 
 func errorFromEnvelope(status byte, envelope importEnvelope) error {
 	if status == statusOK {
 		return nil
 	}
-	err := errors.New(envelope.Error)
+	err := errors.New(strconv.QuoteToGraphic(envelope.Error))
 	if status == statusApplied {
 		return &RemoteAppliedError{Result: envelope.Result, Err: err}
 	}

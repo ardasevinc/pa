@@ -39,6 +39,11 @@ func Open(directory string) (*Store, error) {
 	if !filepath.IsAbs(directory) {
 		return nil, fmt.Errorf("store path must be absolute: %q", directory)
 	}
+	resolvedDirectory, err := filepath.EvalSymlinks(directory)
+	if err != nil {
+		return nil, fmt.Errorf("resolve store path: %w", err)
+	}
+	directory = resolvedDirectory
 
 	passwordsDirectory := filepath.Join(directory, "passwords")
 	if err := requireDirectory(passwordsDirectory); err != nil {
@@ -57,7 +62,7 @@ func Open(directory string) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open store root: %w", err)
 	}
-	passwordsRoot, err := os.OpenRoot(passwordsDirectory)
+	passwordsRoot, err := root.OpenRoot("passwords")
 	if err != nil {
 		_ = root.Close()
 		return nil, fmt.Errorf("open password root: %w", err)

@@ -307,7 +307,39 @@ func TestSSHHelperProcess(t *testing.T) {
 	if err := Serve(context.Background(), age, os.Getenv("PA_TEST_REMOTE_STORE"), os.Stdin, os.Stdout); err != nil {
 		os.Exit(91)
 	}
+	if os.Getenv("PA_TEST_SSH_EXIT_AFTER_SERVE") == "1" {
+		os.Exit(42)
+	}
 	os.Exit(0)
+}
+
+func TestPushReportsAppliedWhenSSHFinalizationFails(t *testing.T) {
+	age, err := agecmd.Find("")
+	if err != nil {
+		t.Skip(err)
+	}
+	local := newRemoteFixture(t, age)
+	remoteStore := newRemoteFixture(t, age)
+	local.add(t, "local", []byte("secret"))
+	bundle := filepath.Join(t.TempDir(), "push.age")
+	if _, err := transfer.Export(t.Context(), age, local.store, remoteStore.store.RecipientsPath, bundle); err != nil {
+		t.Fatal(err)
+	}
+	sshShim := filepath.Join(t.TempDir(), "ssh")
+	shim := "#!/bin/sh\nexec \"$PA_TEST_BINARY\" -test.run=TestSSHHelperProcess\n"
+	if err := os.WriteFile(sshShim, []byte(shim), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PA_TEST_SSH_HELPER", "1")
+	t.Setenv("PA_TEST_BINARY", os.Args[0])
+	t.Setenv("PA_TEST_REMOTE_STORE", remoteStore.directory)
+	t.Setenv("PA_TEST_SSH_EXIT_AFTER_SERVE", "1")
+
+	result, err := (Client{Host: "test-host", SSHPath: sshShim}).Push(t.Context(), bundle)
+	var applied *RemoteAppliedError
+	if result.Imported != 1 || !errors.As(err, &applied) {
+		t.Fatalf("Push() = %+v, %v; want one import and RemoteAppliedError", result, err)
+	}
 }
 
 func TestValidateSSHOptions(t *testing.T) {
@@ -345,6 +377,23 @@ func TestFormatStderrEscapesTerminalControls(t *testing.T) {
 		if !strings.Contains(actual, escaped) {
 			t.Errorf("formatStderr() = %q, missing %q", actual, escaped)
 		}
+	}
+}
+
+func TestProtocolErrorsEscapeTerminalControls(t *testing.T) {
+	var payload bytes.Buffer
+	if err := writeBytes32(&payload, []byte("bad\x1b]52;c;Y2xpcGJvYXJk\a")); err != nil {
+		t.Fatal(err)
+	}
+	for name, err := range map[string]error{
+		"status error":   readRemoteError(&payload, statusError),
+		"envelope error": errorFromEnvelope(statusError, importEnvelope{Error: "bad\x1b]52;c;Y2xpcGJvYXJk\a"}),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err == nil || strings.ContainsRune(err.Error(), '\x1b') || strings.ContainsRune(err.Error(), '\a') {
+				t.Fatalf("protocol error was not terminal-safe: %q", err)
+			}
+		})
 	}
 }
 

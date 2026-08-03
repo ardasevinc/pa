@@ -195,6 +195,13 @@ func TestRegistryStaysAnchoredWhenStorePathIsRetargeted(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = opened.Close() })
+	firstResolved, err := filepath.EvalSymlinks(first.directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opened.Dir != firstResolved || opened.PasswordsDir != filepath.Join(firstResolved, "passwords") || opened.IdentitiesPath != filepath.Join(firstResolved, "identities") {
+		t.Fatalf("Store.Open() retained retargetable paths: %+v", opened)
+	}
 	if err := os.Remove(link); err != nil {
 		t.Fatal(err)
 	}
