@@ -34,7 +34,7 @@
       [m]ove [src] [name] - Rename a password entry.
 
     env vars:
-      data directory:   export PA_DIR=~/.local/share/pa/passwords
+      data directory:   export PA_DIR=~/.local/share/pa
       password length:  export PA_LENGTH=50
       password pattern: export PA_PATTERN=A-Za-z0-9_-
       disable tracking: export PA_NOGIT=
@@ -109,8 +109,9 @@
     its own before/after snapshots and receipt, and records one Git commit. A
     crash can leave a valid mixture of old and restored entries, never a
     plaintext file or an absent password directory. After reviewing the dirty
-    Git state, rerun with --allow-dirty to converge. The snapshot's Git database is retained as recovery evidence but
-    is not installed over the current repository history.
+    Git state, rerun with --allow-dirty to converge. The snapshot's Git database
+    is retained as recovery evidence but is not installed over the current
+    repository history.
 
 
   installation
