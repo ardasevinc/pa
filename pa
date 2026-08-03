@@ -11,7 +11,7 @@ pw_add() {
 
         pass=$PA_PASSWORD
     elif yn "generate a password?"; then
-        pass=$(rand_chars "${PA_LENGTH:-50}" "${PA_PATTERN:-A-Za-z0-9-_}") ||
+        pass=$(rand_chars "${PA_LENGTH:-50}" "${PA_PATTERN:-A-Za-z0-9_-}") ||
             die "couldn't generate a password"
     else
         # 'sread()' is a simple wrapper function around 'read'
@@ -65,11 +65,16 @@ pw_edit() {
     new=true tmpfile=$tmpdir/pa.$(rand_chars 10 'A-Za-z0-9') ||
         die "couldn't generate random characters"
 
-    trap 'rm -f "$tmpfile"' EXIT
+    (: >"$tmpfile") 2>/dev/null ||
+        die "couldn't create a shared memory filename"
+
+    trap 'rm -f "$tmpfile" "$tmpfile.orig"' EXIT
 
     [ -f "$name.age" ] && new=false &&
         { $age --decrypt -i "$identities_file" -o "$tmpfile" "./$name.age" ||
             die "couldn't decrypt $name.age"; }
+
+    cp "$tmpfile" "$tmpfile.orig"
 
     # PA_PASSWORD allows non-interactive editing for
     # scripting and agent use. Bypasses EDITOR.
@@ -77,13 +82,14 @@ pw_edit() {
         [ "$PA_PASSWORD" ] ||
             die "PA_PASSWORD can't be empty"
 
-        printf '%s\n' "$PA_PASSWORD" > "$tmpfile"
+        printf '%s\n' "$PA_PASSWORD" | dd of="$tmpfile" 2>/dev/null ||
+            die "couldn't write temporary password file"
     else
         ${EDITOR:-vi} "$tmpfile" ||
             die "EDITOR exited non-zero"
     fi
 
-    [ -s "$tmpfile" ] || return
+    cmp -s "$tmpfile" "$tmpfile.orig" || [ ! -s "$tmpfile" ] && return
 
     mkdir -p "$(dirname -- "$name")" ||
         die "couldn't create category '$(dirname -- "$name")'"
@@ -115,6 +121,18 @@ pw_list() {
     find "./$name" -type f -name \*.age | sed 's/..//;s/\.age$//' | sort
 }
 
+pw_move() {
+    mkdir -p "$(dirname -- "$name")" ||
+        die "couldn't create category '$(dirname -- "$name")'"
+
+    mv -- "$src.age" "$name.age"
+
+    if $git_enabled; then
+        git rm -q "./$src.age"
+        git_add_and_commit "./$name.age" "move '$src' to '$name'"
+    fi
+}
+
 git_add_and_commit() {
     git add "$1" ||
         die "couldn't git add $1"
@@ -135,7 +153,7 @@ rand_chars() {
     #
     # $1 = number of chars to receive
     # $2 = filter for the chars
-    LC_ALL=C tr -dc "$2" </dev/urandom | dd ibs=1 obs=1 count="$1" 2>/dev/null
+    LC_ALL=C tr -dc "$2" </dev/urandom | dd bs=1 count="$1" 2>/dev/null
 }
 
 yn() {
@@ -150,7 +168,7 @@ yn() {
 
     # Read a single byte from stdin using 'dd'. POSIX 'read' has
     # no support for single/'N' byte based input from the user.
-    answer=$(dd ibs=1 count=1 2>/dev/null)
+    answer=$(dd bs=1 count=1 2>/dev/null)
 
     # Disable raw input, leaving the terminal how we *should*
     # have found it.
@@ -206,11 +224,12 @@ usage() {
     [g]it  [cmd]  - Run git command in the password dir.
     [l]ist [cat]  - List all entries in a category.
     [s]how [name] - Show password for an entry.
+    [m]ove [src] [name] - Rename a password entry.
 
   env vars:
     data directory:   export PA_DIR=~/.local/share/pa
     password length:  export PA_LENGTH=50
-    password pattern: export PA_PATTERN=A-Za-z0-9-_
+    password pattern: export PA_PATTERN=A-Za-z0-9_-
     disable tracking: export PA_NOGIT=
     skip prompts:     export PA_NOCONFIRM=
     set password:     export PA_PASSWORD=<value>
@@ -273,24 +292,32 @@ main() {
         exit $?
     }
 
+    glob "$command" 'm*' && { src=$1 && [ "$src" ] ||
+        die "missing [src] argument"; } && shift
+
     # Combine the rest of positional arguments into
     # a name and remove control characters from it
     # so that a name can always be safely displayed.
     name=$(printf %s "$*" | LC_ALL=C tr -d '[:cntrl:]')
 
-    glob "$command" '[ades]*' && [ -z "$name" ] &&
+    glob "$command" '[adesm]*' && [ -z "$name" ] &&
         die "missing [name] argument"
 
-    glob "$command" '[ades]*' && { glob "$name" '/*' || glob "$name" '*/'; } &&
+    glob "$command" '[adesm]*' && { glob "$name" '/*' || glob "$name" '*/' ||
+        glob "$src" '/*' || glob "$src" '*/'; } &&
         die "name can't start or end with '/'"
 
     glob "$command" 'l*' && glob "$name" '/*' &&
         die "category can't start with '/'"
 
-    glob "$name" '../*' || glob "$name" '*/../*' &&
+    glob "$name" '../*' || glob "$name" '*/../*' ||
+        glob "$src" '../*' || glob "$src" '*/../*' &&
         die "category went out of bounds"
 
-    glob "$command" 'a*' && [ -f "$name.age" ] &&
+    glob "$command" 'm*' && [ ! -f "$src.age" ] &&
+        die "password '$src' doesn't exist"
+
+    glob "$command" '[am]*' && [ -f "$name.age" ] &&
         die "password '$name' already exists"
 
     glob "$command" '[ds]*' && [ ! -f "$name.age" ] &&
@@ -330,6 +357,7 @@ main() {
     e*) pw_edit ;;
     l*) pw_list ;;
     s*) pw_show ;;
+    m*) pw_move ;;
     *) usage ;;
     esac
 }
@@ -337,6 +365,10 @@ main() {
 # Ensure that debug mode is never enabled to
 # prevent the password from leaking.
 set +x
+
+# Prevent accidentally writing to existing
+# files to avoid TOCTOU vulnerabilities.
+set -C
 
 # Restrict permissions of any new files to
 # only the current user.
