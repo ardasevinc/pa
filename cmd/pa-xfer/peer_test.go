@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -76,6 +77,7 @@ func TestPeerCLIHelperProcess(t *testing.T) {
 	if os.Getenv("PA_TEST_PEER_HELPER") != "1" {
 		return
 	}
+	sshCount := 0
 	if countPath := os.Getenv("PA_TEST_SSH_COUNT"); countPath != "" {
 		file, err := os.OpenFile(countPath, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
 		if err != nil {
@@ -89,23 +91,9 @@ func TestPeerCLIHelperProcess(t *testing.T) {
 		if err != nil {
 			os.Exit(92)
 		}
-		count := bytes.Count(data, []byte("\n"))
-		blockAt, _ := strconv.Atoi(os.Getenv("PA_TEST_BLOCK_SSH_AT"))
-		if blockAt == count {
-			signal := os.Getenv("PA_TEST_BLOCK_SIGNAL")
-			release := os.Getenv("PA_TEST_BLOCK_RELEASE")
-			if err := os.WriteFile(signal, []byte("blocked\n"), 0o600); err != nil {
-				os.Exit(93)
-			}
-			deadline := time.Now().Add(10 * time.Second)
-			for {
-				if _, err := os.Stat(release); err == nil {
-					break
-				} else if !errors.Is(err, os.ErrNotExist) || time.Now().After(deadline) {
-					os.Exit(94)
-				}
-				time.Sleep(10 * time.Millisecond)
-			}
+		sshCount = bytes.Count(data, []byte("\n"))
+		if err := blockPeerSSH(sshCount, "PA_TEST_BLOCK_SSH_AT"); err != nil {
+			os.Exit(93)
 		}
 	}
 	age, err := agecmd.Find("")
@@ -115,7 +103,33 @@ func TestPeerCLIHelperProcess(t *testing.T) {
 	if err := remote.Serve(context.Background(), age, os.Getenv("PA_TEST_REMOTE_STORE"), os.Stdin, os.Stdout); err != nil {
 		os.Exit(91)
 	}
+	if err := blockPeerSSH(sshCount, "PA_TEST_BLOCK_SSH_AFTER_AT"); err != nil {
+		os.Exit(94)
+	}
 	os.Exit(0)
+}
+
+func blockPeerSSH(count int, variable string) error {
+	blockAt, _ := strconv.Atoi(os.Getenv(variable))
+	if blockAt == 0 || blockAt != count {
+		return nil
+	}
+	signal := os.Getenv("PA_TEST_BLOCK_SIGNAL")
+	release := os.Getenv("PA_TEST_BLOCK_RELEASE")
+	if err := os.WriteFile(signal, []byte("blocked\n"), 0o600); err != nil {
+		return err
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if _, err := os.Stat(release); err == nil {
+			return nil
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return err
+		} else if time.Now().After(deadline) {
+			return errors.New("timed out waiting for SSH helper release")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 func TestPeerAddListShowAndRemove(t *testing.T) {
@@ -397,6 +411,84 @@ func TestNamedPeerSyncHoldsTrustLeaseThroughPush(t *testing.T) {
 	}
 }
 
+func TestNamedPeerChangeAfterProbeAbortsBeforeDecrypt(t *testing.T) {
+	fixture := newPeerCLIFixture(t, true)
+	writePeerEntry(t, fixture.age, fixture.local, "local-only", []byte("secret"))
+	addPeerForTest(t, fixture, peerStoreFingerprint(t, fixture.remote))
+
+	control := t.TempDir()
+	countPath := filepath.Join(control, "count")
+	signalPath := filepath.Join(control, "blocked")
+	releasePath := filepath.Join(control, "release")
+	ageLog := filepath.Join(control, "age-log")
+	ageWrapper := filepath.Join(control, "age")
+	wrapper := fmt.Sprintf("#!/bin/sh\nprintf 'invoked\\n' >> \"$PA_TEST_AGE_LOG\"\nexec %q \"$@\"\n", fixture.age.Path)
+	if err := os.WriteFile(ageWrapper, []byte(wrapper), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PA_TEST_SSH_COUNT", countPath)
+	t.Setenv("PA_TEST_BLOCK_SSH_AFTER_AT", "1")
+	t.Setenv("PA_TEST_BLOCK_SIGNAL", signalPath)
+	t.Setenv("PA_TEST_BLOCK_RELEASE", releasePath)
+	t.Setenv("PA_TEST_AGE_LOG", ageLog)
+
+	type outcome struct {
+		code           int
+		stdout, stderr string
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		code, stdout, stderr := runPeerCLI(t, []string{
+			"sync", "devbox", "--store", fixture.local, "--ssh", fixture.ssh, "--age", ageWrapper,
+		}, "", false)
+		done <- outcome{code: code, stdout: stdout, stderr: stderr}
+	}()
+	waitForFile(t, signalPath)
+
+	opened, err := store.Open(fixture.local)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry, err := peerregistry.Open(opened)
+	if err != nil {
+		t.Fatal(err)
+	}
+	current, err := registry.Get("devbox")
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacement := current
+	replacement.Host = "replacement-host"
+	if err := registry.Replace(current, replacement); err != nil {
+		t.Fatal(err)
+	}
+	if err := errors.Join(registry.Close(), opened.Close()); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(releasePath, []byte("release\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case result := <-done:
+		if result.code == 0 || !strings.Contains(result.stderr, "changed while sync was starting") || !strings.Contains(result.stderr, "no password data was sent") {
+			t.Fatalf("changed-peer sync = code %d, stdout %q, stderr %q", result.code, result.stdout, result.stderr)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("changed-peer sync did not finish")
+	}
+	if _, err := os.Stat(ageLog); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("age command ran before changed-peer abort: %v", err)
+	}
+	count, err := os.ReadFile(countPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(count) != "1\n" {
+		t.Fatalf("changed-peer sync spawned %q SSH requests, want one", count)
+	}
+}
+
 type failedWriter struct{}
 
 func (failedWriter) Write([]byte) (int, error) { return 0, errors.New("writer failed") }
@@ -422,6 +514,23 @@ func TestPeerMutationOutputFailureReportsApplied(t *testing.T) {
 	}
 	if actual := readPeerRecord(t, fixture.local, "devbox"); actual.Fingerprint != fingerprint {
 		t.Fatalf("applied add record = %+v", actual)
+	}
+}
+
+func TestSyncOutputFailureReportsApplied(t *testing.T) {
+	fixture := newPeerCLIFixture(t, true)
+	writePeerEntry(t, fixture.age, fixture.local, "local-only", []byte("secret"))
+	addPeerForTest(t, fixture, peerStoreFingerprint(t, fixture.remote))
+
+	var stderr bytes.Buffer
+	code := runWithInput(t.Context(), []string{
+		"sync", "devbox", "--store", fixture.local, "--ssh", fixture.ssh,
+	}, strings.NewReader(""), false, failedWriter{}, &stderr)
+	if code != 3 || !strings.Contains(stderr.String(), "sync entries were applied") {
+		t.Fatalf("sync output failure = code %d, stderr %q", code, stderr.String())
+	}
+	if actual := readPeerEntry(t, fixture.age, fixture.remote, "local-only"); !bytes.Equal(actual, []byte("secret")) {
+		t.Fatalf("remote entry after applied output failure = %q", actual)
 	}
 }
 

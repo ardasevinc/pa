@@ -104,6 +104,11 @@ func runWithInput(ctx context.Context, arguments []string, input io.Reader, inte
 	}
 
 	var applied *transfer.AppliedError
+	var syncApplied *syncAppliedError
+	if errors.As(err, &syncApplied) {
+		fmt.Fprintf(stderr, "pa-xfer: %v\n", err)
+		return 3
+	}
 	if errors.As(err, &applied) {
 		fmt.Fprintf(stderr, "pa-xfer: %v\n", err)
 		return 3
@@ -337,6 +342,18 @@ type syncResult struct {
 	Pulled          transfer.ImportResult `json:"pulled"`
 }
 
+type syncAppliedError struct {
+	Pushed transfer.ImportResult
+	Pulled transfer.ImportResult
+	Err    error
+}
+
+func (e *syncAppliedError) Error() string {
+	return fmt.Sprintf("sync entries were applied but finalization failed: %v", e.Err)
+}
+
+func (e *syncAppliedError) Unwrap() error { return e.Err }
+
 func runSync(ctx context.Context, arguments []string, stdout, stderr io.Writer) (returnErr error) {
 	var peerName string
 	if len(arguments) > 0 && !strings.HasPrefix(arguments[0], "-") {
@@ -451,35 +468,51 @@ func runSync(ctx context.Context, arguments []string, stdout, stderr io.Writer) 
 		lock := syncLock
 		syncLock = nil
 		if err := lock.Release(); err != nil {
-			return &remote.RemoteAppliedError{Result: pushed, Err: fmt.Errorf("release named-sync trust lease: %w", err)}
+			return finishSync(pushed, transfer.ImportResult{}, fmt.Errorf("release named-sync trust lease: %w", err))
 		}
 	}
 
 	localRecipients, err := os.ReadFile(local.RecipientsPath)
 	if err != nil {
-		return err
+		return finishSync(pushed, transfer.ImportResult{}, err)
 	}
 	pullBundle := filepath.Join(temporaryDirectory, "pull.age")
 	if err := client.Pull(ctx, localRecipients, pullBundle); err != nil {
-		return fmt.Errorf("pull: %w", err)
+		return finishSync(pushed, transfer.ImportResult{}, fmt.Errorf("pull: %w", err))
 	}
-	pulled, err := transfer.Import(ctx, age, local, pullBundle)
+	pulled, importErr := transfer.Import(ctx, age, local, pullBundle)
 	result := syncResult{PeerName: peerName, PeerFingerprint: peer.Fingerprint, Pushed: pushed, Pulled: pulled}
 	if peerName != "" {
 		result.PeerHost = client.Host
 	}
 	if common.json {
 		if jsonErr := writeJSON(stdout, result); jsonErr != nil {
-			return errors.Join(err, jsonErr)
+			return finishSync(pushed, pulled, errors.Join(importErr, jsonErr))
 		}
 	} else {
+		var outputErr error
 		if peerName != "" {
-			fmt.Fprintf(stdout, "peer %s (%s) %s\n", peerName, client.Host, peer.Fingerprint)
+			_, outputErr = fmt.Fprintf(stdout, "peer %s (%s) %s\n", peerName, client.Host, peer.Fingerprint)
 		} else {
-			fmt.Fprintf(stdout, "peer %s\n", peer.Fingerprint)
+			_, outputErr = fmt.Fprintf(stdout, "peer %s\n", peer.Fingerprint)
 		}
-		fmt.Fprintf(stdout, "push: imported %d, skipped %d\n", pushed.Imported, pushed.Skipped)
-		fmt.Fprintf(stdout, "pull: imported %d, skipped %d\n", pulled.Imported, pulled.Skipped)
+		if outputErr == nil {
+			_, outputErr = fmt.Fprintf(stdout, "push: imported %d, skipped %d\n", pushed.Imported, pushed.Skipped)
+		}
+		if outputErr == nil {
+			_, outputErr = fmt.Fprintf(stdout, "pull: imported %d, skipped %d\n", pulled.Imported, pulled.Skipped)
+		}
+		importErr = errors.Join(importErr, outputErr)
+	}
+	return finishSync(pushed, pulled, importErr)
+}
+
+func finishSync(pushed, pulled transfer.ImportResult, err error) error {
+	if err == nil {
+		return nil
+	}
+	if pushed.Imported > 0 || pulled.Imported > 0 || pulled.Partial {
+		return &syncAppliedError{Pushed: pushed, Pulled: pulled, Err: err}
 	}
 	return err
 }
