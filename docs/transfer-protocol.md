@@ -99,3 +99,17 @@ Bidirectional sync is two explicit one-way operations: push, then pull. It is
 not represented as an atomic distributed transaction. If push succeeds and
 pull fails, rerunning is safe because imports are monotonic and never replace an
 existing name.
+
+## Recovery boundary
+
+Import snapshots contain the complete encrypted password tree and Git metadata
+before and after a changing transaction. `receipt.json` records counts, paths,
+timestamps, and transaction state, never secret values or plaintext hashes.
+
+`pa-xfer restore` is deliberately separate from import and sync. It is the only
+command permitted to replace an existing entry or remove an entry that is not
+in the selected snapshot, and requires `--yes`. It verifies that every selected
+ciphertext decrypts with the current machine identity before mutation. Changes
+are entry-atomic and journaled; the current store is snapshotted again before
+restore. The selected snapshot's Git database remains evidence while the live
+repository records restoration as a new commit.

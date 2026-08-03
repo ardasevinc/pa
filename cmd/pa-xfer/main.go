@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/ardasevinc/pa/internal/agecmd"
+	"github.com/ardasevinc/pa/internal/recovery"
 	"github.com/ardasevinc/pa/internal/remote"
 	"github.com/ardasevinc/pa/internal/store"
 	"github.com/ardasevinc/pa/internal/transfer"
@@ -26,6 +27,8 @@ const usageText = `usage:
   pa-xfer recipient [options]
   pa-xfer peer --host HOST [options]
   pa-xfer sync --host HOST --peer-fingerprint SHA256 [options]
+  pa-xfer backups [options]
+  pa-xfer restore --transaction ID --yes [options]
 
 commands:
   export      decrypt this store and create a bundle for another identity
@@ -34,6 +37,8 @@ commands:
   recipient   print this store's public recipient and fingerprint
   peer        fetch a remote store's public recipient over SSH
   sync        push then pull through a pinned, encrypted SSH transfer
+  backups     list private recovery snapshots
+  restore     explicitly restore the exact entry set from a snapshot
 
 common options:
   --store DIR  pa data directory (default: $PA_DIR or the pa default)
@@ -67,6 +72,10 @@ func run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int 
 		err = runSync(ctx, arguments[1:], stdout, stderr)
 	case "serve":
 		err = runServe(ctx, arguments[1:], stdinReader{}, stdout, stderr)
+	case "backups":
+		err = runBackups(arguments[1:], stdout, stderr)
+	case "restore":
+		err = runRestore(ctx, arguments[1:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "pa-xfer: unknown command %q\n", arguments[0])
 		_, _ = io.WriteString(stderr, usageText)
@@ -83,6 +92,11 @@ func run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int 
 	}
 	var remoteApplied *remote.RemoteAppliedError
 	if errors.As(err, &remoteApplied) {
+		fmt.Fprintf(stderr, "pa-xfer: %v\n", err)
+		return 3
+	}
+	var recoveryApplied *recovery.AppliedError
+	if errors.As(err, &recoveryApplied) {
 		fmt.Fprintf(stderr, "pa-xfer: %v\n", err)
 		return 3
 	}

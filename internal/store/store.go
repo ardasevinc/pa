@@ -446,6 +446,42 @@ func (t *Transaction) Publish(name string) (bool, error) {
 	return true, nil
 }
 
+// Replace publishes staged ciphertext over an existing entry. It is reserved
+// for explicit backup restoration; synchronization must always use Publish.
+func (t *Transaction) Replace(name string) (bool, error) {
+	entryPath, err := entryRelativePath(name)
+	if err != nil {
+		return false, err
+	}
+	stagedPath := path.Join(t.rootPath, "entries", entryPath)
+	finalPath := path.Join("passwords", entryPath)
+	if err := t.store.root.MkdirAll(path.Dir(finalPath), 0o700); err != nil {
+		return false, fmt.Errorf("create restored category: %w", err)
+	}
+	if err := t.store.root.Rename(stagedPath, finalPath); err != nil {
+		return false, fmt.Errorf("restore entry %q: %w", name, err)
+	}
+	return true, errors.Join(t.store.syncFile(finalPath), t.store.syncDirectory(path.Dir(finalPath)))
+}
+
+// Displace moves an entry out of the live store while retaining it in the
+// transaction until restoration has been verified and finalized.
+func (t *Transaction) Displace(name string) (bool, error) {
+	entryPath, err := entryRelativePath(name)
+	if err != nil {
+		return false, err
+	}
+	finalPath := path.Join("passwords", entryPath)
+	displacedPath := path.Join(t.rootPath, "displaced", entryPath)
+	if err := t.store.root.MkdirAll(path.Dir(displacedPath), 0o700); err != nil {
+		return false, fmt.Errorf("create displaced entry directory: %w", err)
+	}
+	if err := t.store.root.Rename(finalPath, displacedPath); err != nil {
+		return false, fmt.Errorf("displace entry %q: %w", name, err)
+	}
+	return true, t.store.syncDirectory(path.Dir(finalPath))
+}
+
 func (t *Transaction) Remove() error {
 	if err := t.store.root.RemoveAll(t.rootPath); err != nil {
 		return fmt.Errorf("remove transaction: %w", err)

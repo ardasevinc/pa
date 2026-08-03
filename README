@@ -92,6 +92,26 @@
     mode. Use repeated --ssh-option flags for connection settings, for example
     --ssh-option=-p --ssh-option=2222.
 
+    Imports and restores retain recovery material under $PA_DIR/backups. List
+    it with:
+
+      $ pa-xfer backups
+
+    Restoring is the only operation allowed to replace existing entry names.
+    It requires an explicit confirmation flag and restores the exact encrypted
+    entry set from one snapshot:
+
+      $ pa-xfer restore --transaction TRANSACTION_ID --phase before --yes
+
+    Restore verifies every backup entry against the machine's current local
+    age identity before touching the live store. It then replaces or displaces
+    ciphertext one entry at a time, verifies exact ciphertext equality, creates
+    its own before/after snapshots and receipt, and records one Git commit. A
+    crash can leave a valid mixture of old and restored entries, never a
+    plaintext file or an absent password directory. After reviewing the dirty
+    Git state, rerun with --allow-dirty to converge. The snapshot's Git database is retained as recovery evidence but
+    is not installed over the current repository history.
+
 
   installation
     $ make check
