@@ -1,0 +1,85 @@
+# pa transfer protocol
+
+`pa-xfer` transfers password entries between stores that intentionally use
+different age identities. It never copies an identity and never makes one
+machine a recipient of another machine's at-rest ciphertext.
+
+## Invariants
+
+- Transfer is set union by entry name.
+- An existing destination name is always preserved without comparing values.
+- There is no overwrite, force, newest-wins, or conflict-resolution mode.
+- Secret values never enter argv, environment variables, logs, or plaintext
+  files.
+- Only an age-encrypted bundle may be stored or cross an SSH process boundary.
+- Imported values are re-encrypted to the destination's local recipients before
+  publication.
+- Each published entry is complete, locally decryptable ciphertext installed
+  with an atomic no-replace operation.
+- A batch may apply a valid prefix before interruption. Rerunning is safe and
+  converges monotonically.
+
+## PAXFER1 framing
+
+The plaintext inside an age envelope is a binary stream. Integers are unsigned
+big-endian values.
+
+```text
+magic             8 bytes: "PAXFER1\n"
+
+entry-start       0x01
+name-length       uint32
+name              name-length bytes of UTF-8
+
+entry-data        0x02
+chunk-length      uint32
+chunk             chunk-length arbitrary bytes
+
+entry-end         0x03
+value-length      uint64
+value-sha256      32 bytes
+
+bundle-end        0xff
+entry-count       uint32
+transcript-sha256 32 bytes
+EOF
+```
+
+Every entry has exactly one `entry-start`, zero or more `entry-data` frames, and
+one `entry-end`. The value digest covers the concatenated data bytes. The
+transcript digest covers every byte from `magic` through the bundle-end entry
+count, excluding only the transcript digest itself.
+
+The age envelope supplies confidentiality and authentication. The inner hashes
+detect implementation and re-encryption errors; they are never printed or
+stored outside the encrypted bundle and destination transaction metadata.
+
+Decoders reject unknown frames, malformed lengths, duplicate names, trailing
+bytes, truncated streams, mismatched sizes or digests, missing bundle ends, and
+resource-limit violations.
+
+## Names
+
+Names are UTF-8 relative slash-separated paths. Components must be non-empty and
+cannot be `.`, `..`, `.git`, or begin with `.pa-`. Absolute paths and control
+characters are rejected. Names are never silently normalized.
+
+Destination publication remains the final authority for case-insensitive or
+filesystem-specific collisions: no-replace publication treats a collision as
+an existing destination and preserves it.
+
+## SSH shape
+
+The only remote shell command is fixed:
+
+```text
+pa-xfer serve
+```
+
+Names, paths, recipients, and options travel inside the versioned protocol, not
+as interpolated shell fragments. SSH host-key verification authenticates the
+machine. The peer's public age-recipient fingerprint is pinned separately to
+detect accidental identity or store changes before local secrets are decrypted.
+
+Bidirectional sync is two explicit one-way operations: push, then pull. It is
+not represented as an atomic distributed transaction.
