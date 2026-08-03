@@ -209,6 +209,9 @@ func ensureTemporaryDirectory(storeDirectory string) (string, error) {
 	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 		return "", errors.New("pa transactions path is not a real directory")
 	}
+	if info.Mode().Perm()&0o077 != 0 {
+		return "", errors.New("pa transactions directory is accessible by other users")
+	}
 	return directory, nil
 }
 

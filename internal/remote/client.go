@@ -204,6 +204,9 @@ func (c Client) start(ctx context.Context) (*sshSession, error) {
 	if err := validateHost(c.Host); err != nil {
 		return nil, err
 	}
+	if err := validateSSHOptions(c.SSHOptions); err != nil {
+		return nil, err
+	}
 	sshPath := c.SSHPath
 	if sshPath == "" {
 		sshPath = "ssh"
@@ -212,8 +215,10 @@ func (c Client) start(ctx context.Context) (*sshSession, error) {
 	if err != nil {
 		return nil, fmt.Errorf("find ssh: %w", err)
 	}
-	arguments := append([]string{}, c.SSHOptions...)
-	arguments = append(arguments, "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes")
+	// OpenSSH generally keeps the first value obtained for a setting, so these
+	// enforced values must precede user connection options.
+	arguments := []string{"-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes"}
+	arguments = append(arguments, c.SSHOptions...)
 	arguments = append(arguments, c.Host, "pa-xfer serve")
 	command := exec.CommandContext(ctx, path, arguments...)
 	stderr := &boundedBuffer{limit: 64 * 1024}
@@ -289,6 +294,32 @@ func validateHost(host string) error {
 	for _, character := range host {
 		if unicode.IsControl(character) || unicode.IsSpace(character) {
 			return errors.New("SSH host cannot contain whitespace or control characters")
+		}
+	}
+	return nil
+}
+
+func validateSSHOptions(options []string) error {
+	valueOptions := "BbCcDEeFIiJLlmOoPpQRSwW"
+	flagOptions := "46AaCfGgKkMNnqTtVvXxYy"
+	for index := 0; index < len(options); index++ {
+		option := options[index]
+		if len(option) < 2 || option[0] != '-' || option == "--" {
+			return fmt.Errorf("invalid SSH option %q: positional arguments are not allowed", option)
+		}
+		name := option[1]
+		if strings.ContainsRune(flagOptions, rune(name)) {
+			continue
+		}
+		if !strings.ContainsRune(valueOptions, rune(name)) {
+			return fmt.Errorf("unsupported SSH option %q", option)
+		}
+		if len(option) > 2 {
+			continue
+		}
+		index++
+		if index >= len(options) || options[index] == "" {
+			return fmt.Errorf("SSH option %q requires a value", option)
 		}
 	}
 	return nil

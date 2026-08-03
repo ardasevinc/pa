@@ -300,6 +300,30 @@ func TestSSHHelperProcess(t *testing.T) {
 	os.Exit(0)
 }
 
+func TestValidateSSHOptions(t *testing.T) {
+	valid := [][]string{
+		{"-p", "2222", "-i", "/tmp/key"},
+		{"-p2222", "-o", "ConnectTimeout=5"},
+		{"-J", "jump@example", "-vv"},
+	}
+	for _, options := range valid {
+		if err := validateSSHOptions(options); err != nil {
+			t.Errorf("validateSSHOptions(%v) = %v", options, err)
+		}
+	}
+	invalid := [][]string{
+		{"evil.example"},
+		{"--", "evil.example"},
+		{"-p"},
+		{"-Z"},
+	}
+	for _, options := range invalid {
+		if err := validateSSHOptions(options); err == nil {
+			t.Errorf("validateSSHOptions(%v) accepted invalid options", options)
+		}
+	}
+}
+
 func findKeygen(t *testing.T) string {
 	t.Helper()
 	for _, candidate := range []string{"age-keygen", "rage-keygen"} {
