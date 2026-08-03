@@ -119,7 +119,7 @@ func ValidateRecord(record Record) error {
 func (r *Registry) List() ([]Record, error) {
 	present, err := r.requirePeersDirectory(false)
 	if err != nil || !present {
-		return nil, err
+		return []Record{}, err
 	}
 	directory, err := r.root.Open("peers")
 	if err != nil {

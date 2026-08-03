@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/ardasevinc/pa/internal/agecmd"
+	"github.com/ardasevinc/pa/internal/peerregistry"
 	"github.com/ardasevinc/pa/internal/recovery"
 	"github.com/ardasevinc/pa/internal/remote"
 	"github.com/ardasevinc/pa/internal/store"
@@ -25,7 +26,13 @@ const usageText = `usage:
   pa-xfer import [options] BUNDLE
   pa-xfer verify [options] BUNDLE
   pa-xfer recipient [options]
-  pa-xfer peer --host HOST [options]
+  pa-xfer peer add NAME [options]
+  pa-xfer peer list [options]
+  pa-xfer peer show NAME [options]
+  pa-xfer peer replace NAME [options]
+  pa-xfer peer remove NAME [options]
+  pa-xfer peer probe --host HOST [options]
+  pa-xfer sync PEER [options]
   pa-xfer sync --host HOST --peer-fingerprint SHA256 [options]
   pa-xfer backups [options]
   pa-xfer restore --transaction ID --yes [options]
@@ -35,7 +42,7 @@ commands:
   import      add missing bundle entries, preserving every existing name
   verify      authenticate and decode a bundle without importing it
   recipient   print this store's public recipient and fingerprint
-  peer        fetch a remote store's public recipient over SSH
+  peer        manage saved peer trust or probe a remote recipient
   sync        push then pull through a pinned, encrypted SSH transfer
   backups     list private recovery snapshots
   restore     explicitly restore the exact entry set from a snapshot
@@ -47,10 +54,18 @@ common options:
 `
 
 func main() {
-	os.Exit(run(context.Background(), os.Args[1:], os.Stdout, os.Stderr))
+	interactive := false
+	if info, err := os.Stdin.Stat(); err == nil {
+		interactive = info.Mode()&os.ModeCharDevice != 0
+	}
+	os.Exit(runWithInput(context.Background(), os.Args[1:], os.Stdin, interactive, os.Stdout, os.Stderr))
 }
 
 func run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int {
+	return runWithInput(ctx, arguments, strings.NewReader(""), false, stdout, stderr)
+}
+
+func runWithInput(ctx context.Context, arguments []string, input io.Reader, interactive bool, stdout, stderr io.Writer) int {
 	if len(arguments) == 0 || arguments[0] == "help" || arguments[0] == "--help" || arguments[0] == "-h" {
 		_, _ = io.WriteString(stdout, usageText)
 		return 0
@@ -67,11 +82,11 @@ func run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int 
 	case "recipient":
 		err = runRecipient(arguments[1:], stdout, stderr)
 	case "peer":
-		err = runPeer(ctx, arguments[1:], stdout, stderr)
+		err = runPeer(ctx, arguments[1:], input, interactive, stdout, stderr)
 	case "sync":
 		err = runSync(ctx, arguments[1:], stdout, stderr)
 	case "serve":
-		err = runServe(ctx, arguments[1:], stdinReader{}, stdout, stderr)
+		err = runServe(ctx, arguments[1:], input, stdout, stderr)
 	case "backups":
 		err = runBackups(arguments[1:], stdout, stderr)
 	case "restore":
@@ -100,17 +115,17 @@ func run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int 
 		fmt.Fprintf(stderr, "pa-xfer: %v\n", err)
 		return 3
 	}
+	var peerApplied *peerregistry.AppliedError
+	if errors.As(err, &peerApplied) {
+		fmt.Fprintf(stderr, "pa-xfer: %v\n", err)
+		return 3
+	}
 	if errors.Is(err, flag.ErrHelp) {
 		return 0
 	}
 	fmt.Fprintf(stderr, "pa-xfer: %v\n", err)
 	return 1
 }
-
-// stdinReader keeps the process stdin dependency at the remote-only boundary.
-type stdinReader struct{}
-
-func (stdinReader) Read(data []byte) (int, error) { return os.Stdin.Read(data) }
 
 type commonFlags struct {
 	store string
@@ -278,7 +293,7 @@ func (s sshFlags) client() remote.Client {
 	return remote.Client{Host: s.host, SSHPath: s.sshPath, SSHOptions: s.options}
 }
 
-func runPeer(ctx context.Context, arguments []string, stdout, stderr io.Writer) error {
+func runPeerProbe(ctx context.Context, arguments []string, stdout, stderr io.Writer) error {
 	flags := flag.NewFlagSet("peer", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	var ssh sshFlags
@@ -312,12 +327,19 @@ func runPeer(ctx context.Context, arguments []string, stdout, stderr io.Writer) 
 }
 
 type syncResult struct {
+	PeerName        string                `json:"peer_name,omitempty"`
+	PeerHost        string                `json:"peer_host,omitempty"`
 	PeerFingerprint string                `json:"peer_fingerprint"`
 	Pushed          transfer.ImportResult `json:"pushed"`
 	Pulled          transfer.ImportResult `json:"pulled"`
 }
 
 func runSync(ctx context.Context, arguments []string, stdout, stderr io.Writer) error {
+	var peerName string
+	if len(arguments) > 0 && !strings.HasPrefix(arguments[0], "-") {
+		peerName = arguments[0]
+		arguments = arguments[1:]
+	}
 	flags := flag.NewFlagSet("sync", flag.ContinueOnError)
 	var common commonFlags
 	var ssh sshFlags
@@ -328,8 +350,15 @@ func runSync(ctx context.Context, arguments []string, stdout, stderr io.Writer) 
 	if err := flags.Parse(arguments); err != nil {
 		return err
 	}
-	if ssh.host == "" || pinnedFingerprint == "" || flags.NArg() != 0 {
-		return errors.New("usage: pa-xfer sync --host HOST --peer-fingerprint SHA256 [options]")
+	if flags.NArg() != 0 {
+		return errors.New("usage: pa-xfer sync PEER [options] or pa-xfer sync --host HOST --peer-fingerprint SHA256 [options]")
+	}
+	if peerName != "" {
+		if ssh.host != "" || pinnedFingerprint != "" || len(ssh.options) != 0 {
+			return errors.New("saved-peer sync cannot be combined with --host, --peer-fingerprint, or --ssh-option")
+		}
+	} else if ssh.host == "" || pinnedFingerprint == "" {
+		return errors.New("usage: pa-xfer sync PEER [options] or pa-xfer sync --host HOST --peer-fingerprint SHA256 [options]")
 	}
 
 	age, local, err := openRuntime(common)
@@ -340,13 +369,44 @@ func runSync(ctx context.Context, arguments []string, stdout, stderr io.Writer) 
 	if _, err := local.RequireCleanGit(); err != nil {
 		return fmt.Errorf("local preflight: %w", err)
 	}
+
 	client := ssh.client()
+	var registry *peerregistry.Registry
+	var savedRecord peerregistry.Record
+	if peerName != "" {
+		registry, err = peerregistry.Open(local)
+		if err != nil {
+			return err
+		}
+		defer registry.Close()
+		savedRecord, err = registry.Get(peerName)
+		if err != nil {
+			if errors.Is(err, peerregistry.ErrNotFound) {
+				return fmt.Errorf("unknown peer %q; run `pa-xfer peer list`", peerName)
+			}
+			return err
+		}
+		client = remote.Client{Host: savedRecord.Host, SSHPath: ssh.sshPath}
+		pinnedFingerprint = savedRecord.Fingerprint
+	}
 	peer, err := client.Recipient(ctx)
 	if err != nil {
 		return err
 	}
-	if !strings.EqualFold(peer.Fingerprint, pinnedFingerprint) {
+	if peer.Fingerprint != pinnedFingerprint {
+		if peerName != "" {
+			return fmt.Errorf("peer %q recipient fingerprint changed\nstored: %s\nobserved: %s\nno password data was sent; verify the peer, then run `pa-xfer peer replace %s`", peerName, pinnedFingerprint, peer.Fingerprint, peerName)
+		}
 		return fmt.Errorf("remote recipient fingerprint mismatch: got %s", peer.Fingerprint)
+	}
+	if registry != nil {
+		current, err := registry.Get(peerName)
+		if err != nil {
+			return fmt.Errorf("recheck peer before export: %w", err)
+		}
+		if current != savedRecord {
+			return fmt.Errorf("peer %q changed while sync was starting; no password data was sent", peerName)
+		}
 	}
 
 	temporaryDirectory, err := os.MkdirTemp("", "pa-sync-*")
@@ -376,13 +436,17 @@ func runSync(ctx context.Context, arguments []string, stdout, stderr io.Writer) 
 		return fmt.Errorf("pull: %w", err)
 	}
 	pulled, err := transfer.Import(ctx, age, local, pullBundle)
-	result := syncResult{PeerFingerprint: peer.Fingerprint, Pushed: pushed, Pulled: pulled}
+	result := syncResult{PeerName: peerName, PeerHost: client.Host, PeerFingerprint: peer.Fingerprint, Pushed: pushed, Pulled: pulled}
 	if common.json {
 		if jsonErr := writeJSON(stdout, result); jsonErr != nil {
 			return errors.Join(err, jsonErr)
 		}
 	} else {
-		fmt.Fprintf(stdout, "peer %s\n", peer.Fingerprint)
+		if peerName != "" {
+			fmt.Fprintf(stdout, "peer %s (%s) %s\n", peerName, client.Host, peer.Fingerprint)
+		} else {
+			fmt.Fprintf(stdout, "peer %s\n", peer.Fingerprint)
+		}
 		fmt.Fprintf(stdout, "push: imported %d, skipped %d\n", pushed.Imported, pushed.Skipped)
 		fmt.Fprintf(stdout, "pull: imported %d, skipped %d\n", pulled.Imported, pulled.Skipped)
 	}
