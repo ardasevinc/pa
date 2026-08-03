@@ -157,6 +157,41 @@ PA_PASSWORD='brand-new' ./pa edit pw-new >/dev/null 2>&1 ||
 test "$(./pa show pw-new)" = "brand-new" ||
     fail "PA_PASSWORD pa edit should create a new entry with the password"
 
+# --stdin should preserve arbitrary bytes without an environment variable
+stdin_expected=$test_root/stdin-expected
+stdin_actual=$test_root/stdin-actual
+printf 'first line\nsecond\tline\n\n' >"$stdin_expected"
+
+./pa add --stdin stdin/exact <"$stdin_expected" >/dev/null 2>&1 ||
+    fail "pa add --stdin should succeed"
+
+./pa show stdin/exact >"$stdin_actual" ||
+    fail "pa show should decrypt a stdin-created entry"
+
+cmp -s "$stdin_expected" "$stdin_actual" ||
+    fail "pa add --stdin should preserve exact bytes"
+
+printf 'binary\000value\nwithout-shell-storage' >"$stdin_expected"
+
+./pa edit --stdin stdin/exact <"$stdin_expected" >/dev/null 2>&1 ||
+    fail "pa edit --stdin should succeed"
+
+./pa show stdin/exact >"$stdin_actual" ||
+    fail "pa show should decrypt a stdin-edited entry"
+
+cmp -s "$stdin_expected" "$stdin_actual" ||
+    fail "pa edit --stdin should preserve exact binary bytes"
+
+: >"$stdin_expected"
+./pa add --stdin stdin/empty <"$stdin_expected" >/dev/null 2>&1 ||
+    fail "pa add --stdin should accept an exact empty value"
+
+./pa show stdin/empty >"$stdin_actual" ||
+    fail "pa show should decrypt an empty stdin-created entry"
+
+test ! -s "$stdin_actual" ||
+    fail "pa add --stdin should preserve an empty value"
+
 # PA_PASSWORD with empty value should fail
 test "$(PA_PASSWORD='' ./pa add empty-test 2>&1)" = "pa: PA_PASSWORD can't be empty." ||
     fail "PA_PASSWORD='' should be rejected"
@@ -178,6 +213,45 @@ git -C "$PA_DIR/passwords" log | grep -q "add 'pw-test'" ||
 
 git -C "$PA_DIR/passwords" log | grep -q "edit 'pw-test'" ||
     fail "git log should track PA_PASSWORD edits"
+
+# failed encryption should leave no entry, staging directory, or lock
+fake_bin=$test_root/fake-bin
+mkdir "$fake_bin"
+printf '%s\n' '#!/bin/sh' 'exit 1' >"$fake_bin/age"
+chmod +x "$fake_bin/age"
+
+PATH="$fake_bin:$PATH" PA_PASSWORD='never-written' \
+    ./pa add failed-encryption >/dev/null 2>&1 &&
+    fail "pa add should report encryption failure"
+
+test ! -e "$PA_DIR/passwords/failed-encryption.age" ||
+    fail "failed encryption should not publish an entry"
+
+test ! -e "$PA_DIR/lock" ||
+    fail "failed encryption should release the store lock"
+
+test -z "$(find "$PA_DIR" -name '.pa-stage.*' -print)" ||
+    fail "failed encryption should clean its staging directory"
+
+# a visible store lock should reject every mutating entry point
+mkdir "$PA_DIR/lock"
+printf '%s\n' external >"$PA_DIR/lock/owner"
+printf '%s\n' 'pid=test host=test command=test' >"$PA_DIR/lock/info"
+
+PA_PASSWORD='blocked' ./pa add locked-entry >/dev/null 2>&1 &&
+    fail "pa add should refuse a locked store"
+
+./pa git status >/dev/null 2>&1 &&
+    fail "pa git should refuse a locked store"
+
+test ! -e "$PA_DIR/passwords/locked-entry.age" ||
+    fail "a locked store should not be mutated"
+
+rm -f "$PA_DIR/lock/owner" "$PA_DIR/lock/info"
+rmdir "$PA_DIR/lock"
+
+test -z "$(find "$PA_DIR" -name '.pa-stage.*' -print)" ||
+    fail "pa should clean encrypted staging directories"
 
 # print info & exit w/ correct status
 printf "\ntotal failures: %d\n" "$failures"

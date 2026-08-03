@@ -3,6 +3,11 @@
 # pa - a simple password manager
 
 pw_add() {
+    $password_stdin && {
+        pw_write_stdin add
+        return
+    }
+
     # PA_PASSWORD allows non-interactive password injection
     # for scripting and agent use. Bypasses all prompts.
     if [ "${PA_PASSWORD+x}" ]; then
@@ -35,6 +40,8 @@ pw_add() {
     mkdir -p "$(dirname -- "$name")" ||
         die "couldn't create category '$(dirname -- "$name")'"
 
+    make_stage
+
     # Use 'age' to store the password in an encrypted file.
     # A heredoc is used here instead of a 'printf' to avoid
     # leaking the password through the '/proc' filesystem.
@@ -42,10 +49,13 @@ pw_add() {
     # Heredocs are sometimes implemented via temporary files,
     # however this is typically done using 'mkstemp()' which
     # is more secure than a leak in '/proc'.
-    $age --encrypt -R "$recipients_file" -o "./$name.age" <<-EOF ||
+    $age --encrypt -R "$recipients_file" -o "$stage_file" <<-EOF ||
 		$pass
 	EOF
         die "couldn't encrypt $name.age"
+
+    publish_stage_no_replace "./$name.age" ||
+        die "password '$name' appeared while it was being added"
 
     printf '%s\n' "saved '$name' to the store."
 
@@ -53,6 +63,11 @@ pw_add() {
 }
 
 pw_edit() {
+    $password_stdin && {
+        pw_write_stdin edit
+        return
+    }
+
     # Prefer /dev/shm because it's an in-memory
     # space that we can use to store data without
     # having bits laying around in sectors.
@@ -69,8 +84,6 @@ pw_edit() {
 
     (: >"$tmpfile") 2>/dev/null ||
         die "couldn't create a shared memory filename"
-
-    trap 'rm -f "$tmpfile" "$tmpfile.orig"' EXIT
 
     [ -f "$name.age" ] && new=false &&
         { $age --decrypt -i "$identities_file" -o "$tmpfile" "./$name.age" ||
@@ -98,8 +111,18 @@ pw_edit() {
     mkdir -p "$(dirname -- "$name")" ||
         die "couldn't create category '$(dirname -- "$name")'"
 
-    $age --encrypt -R "$recipients_file" -o "./$name.age" "$tmpfile" ||
+    make_stage
+
+    $age --encrypt -R "$recipients_file" -o "$stage_file" "$tmpfile" ||
         die "couldn't encrypt $name.age"
+
+    if $new; then
+        publish_stage_no_replace "./$name.age" ||
+            die "password '$name' appeared while it was being edited"
+    else
+        publish_stage_replace "./$name.age" ||
+            die "couldn't replace $name.age"
+    fi
 
     if $new; then printf '%s\n' "saved '$name' to the store."; fi
 
@@ -131,12 +154,81 @@ pw_move() {
     mkdir -p "$(dirname -- "$name")" ||
         die "couldn't create category '$(dirname -- "$name")'"
 
-    mv -- "$src.age" "$name.age"
+    ln "$src.age" "$name.age" ||
+        die "password '$name' appeared while it was being moved"
+
+    rm -f "$src.age" || {
+        rm -f "$name.age"
+        die "couldn't remove old password '$src'"
+    }
 
     if $git_enabled; then
         git rm -q "./$src.age"
         git_add_and_commit "./$name.age" "move '$src' to '$name'"
     fi
+}
+
+pw_write_stdin() {
+    action=$1 new=true
+    [ -f "$name.age" ] && new=false
+
+    ensure_safe_parent "$name"
+
+    mkdir -p "$(dirname -- "$name")" ||
+        die "couldn't create category '$(dirname -- "$name")'"
+
+    make_stage
+
+    $age --encrypt -R "$recipients_file" -o "$stage_file" ||
+        die "couldn't encrypt $name.age from standard input"
+
+    if $new; then
+        publish_stage_no_replace "./$name.age" ||
+            die "password '$name' appeared while it was being written"
+
+        printf '%s\n' "saved '$name' to the store."
+    else
+        publish_stage_replace "./$name.age" ||
+            die "couldn't replace $name.age"
+    fi
+
+    $git_enabled && git_add_and_commit "./$name.age" "$action '$name'"
+}
+
+make_stage() {
+    attempts=0
+    while [ "$attempts" -lt 10 ]; do
+        attempts=$((attempts + 1))
+        stage_token=$(rand_chars 16 'A-Za-z0-9') ||
+            die "couldn't generate a staging directory name"
+        stage_dir=$PA_DIR/.pa-stage.$stage_token
+
+        if mkdir "$stage_dir" 2>/dev/null; then
+            stage_file=$stage_dir/password.age
+            return
+        fi
+    done
+
+    die "couldn't create a staging directory"
+}
+
+discard_stage() {
+    [ ! "$stage_file" ] || rm -f "$stage_file"
+    [ ! "$stage_dir" ] || rmdir "$stage_dir" 2>/dev/null || :
+    stage_file=''
+    stage_dir=''
+}
+
+publish_stage_no_replace() {
+    ln "$stage_file" "$1" || return
+    discard_stage
+}
+
+publish_stage_replace() {
+    mv "$stage_file" "$1" || return
+    stage_file=''
+    rmdir "$stage_dir" 2>/dev/null || :
+    stage_dir=''
 }
 
 git_add_and_commit() {
@@ -264,6 +356,47 @@ ensure_safe_parent() {
     done
 }
 
+acquire_lock() {
+    lock_token=$(rand_chars 16 'A-Za-z0-9') ||
+        die "couldn't generate a lock token"
+
+    if ! mkdir "$lock_dir" 2>/dev/null; then
+        lock_info=unknown
+        [ ! -r "$lock_dir/info" ] ||
+            lock_info=$(sed -n '1p' "$lock_dir/info")
+        die "store is locked ($lock_info)"
+    fi
+
+    lock_owned=true
+
+    printf '%s\n' "$lock_token" >"$lock_dir/owner" ||
+        die "couldn't record lock ownership"
+
+    printf 'pid=%s host=%s command=%s\n' \
+        "$$" "$(uname -n)" "$command" >"$lock_dir/info" ||
+        die "couldn't record lock information"
+}
+
+release_lock() {
+    $lock_owned || return
+
+    if [ -r "$lock_dir/owner" ] &&
+        [ "$(sed -n '1p' "$lock_dir/owner")" = "$lock_token" ]; then
+        rm -f "$lock_dir/owner" "$lock_dir/info"
+        rmdir "$lock_dir" 2>/dev/null || :
+    fi
+
+    lock_owned=false
+}
+
+cleanup() {
+    [ ! "$tmpfile" ] || rm -f "$tmpfile" "$tmpfile.orig"
+    discard_stage
+    release_lock
+
+    [ ! -t 0 ] || stty echo icanon 2>/dev/null || :
+}
+
 die() {
     printf '%s: %s.\n' "$(basename "$0")" "$1" >&2
     exit 1
@@ -275,9 +408,9 @@ usage() {
     a simple password manager
 
   commands:
-    [a]dd  [name] - Add a password entry.
+    [a]dd  [--stdin] [name] - Add a password entry.
     [d]el  [name] - Delete a password entry.
-    [e]dit [name] - Edit a password entry with ${EDITOR:-vi}.
+    [e]dit [--stdin] [name] - Edit a password entry with ${EDITOR:-vi}.
     [g]it  [cmd]  - Run git command in the password dir.
     [l]ist [cat]  - List all entries in a category.
     [s]how [name] - Show password for an entry.
@@ -308,6 +441,7 @@ main() {
 
     identities_file=$PA_DIR/identities
     recipients_file=$PA_DIR/recipients
+    lock_dir=$PA_DIR/lock
 
     mkdir -p "$PA_DIR/passwords" ||
         die "couldn't create pa directories"
@@ -319,8 +453,26 @@ main() {
     # to avoid insecurities with word-splitting.
     set -f
 
+    trap cleanup 0
+    trap 'exit 130' HUP INT TERM
+
+    command=$1
+    shift
+
+    password_stdin=false
+    glob "$command" '[ae]*' && [ "${1:-}" = --stdin ] && {
+        password_stdin=true
+        shift
+    }
+
     git_enabled=false
     [ -z "${PA_NOGIT+x}" ] && command -v git >/dev/null 2>&1 && git_enabled=true
+
+    needs_lock=false
+    glob "$command" '[ademg]*' && needs_lock=true
+    [ -f "$identities_file" ] && [ -f "$recipients_file" ] || needs_lock=true
+    $git_enabled && [ ! -d .git ] && needs_lock=true
+    $needs_lock && acquire_lock
 
     $git_enabled && [ ! -d .git ] && {
         git init -q
@@ -340,9 +492,6 @@ main() {
 
         git_add_and_commit . "initial commit"
     }
-
-    command=$1
-    shift
 
     glob "$command" 'g*' && {
         git "$@"
@@ -401,9 +550,6 @@ main() {
     [ -f "$recipients_file" ] ||
         $age_keygen -y -o "$recipients_file" "$identities_file" 2>/dev/null
 
-    # Ensure that we leave the terminal in a usable state on Ctrl+C.
-    [ -t 0 ] && trap 'stty echo icanon; trap - INT; kill -s INT 0' INT
-
     case $command in
     a*) pw_add ;;
     d*) pw_del ;;
@@ -426,5 +572,14 @@ set -C
 # Restrict permissions of any new files to
 # only the current user.
 umask 077
+
+lock_owned=false
+lock_token=''
+lock_info=''
+stage_dir=''
+stage_file=''
+stage_token=''
+tmpfile=''
+password_stdin=false
 
 [ "$1" ] || usage && main "$@"
