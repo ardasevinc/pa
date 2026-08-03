@@ -12,7 +12,9 @@ import (
 	"os"
 	"path"
 	"sort"
+	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/ardasevinc/pa/internal/remote"
 	"github.com/ardasevinc/pa/internal/store"
@@ -394,6 +396,12 @@ func (r *Registry) syncDirectory(name string) error {
 }
 
 func decodeRecord(data []byte) (Record, error) {
+	if !utf8.Valid(data) {
+		return Record{}, errors.New("peer record is not valid UTF-8")
+	}
+	if err := rejectSurrogateEscapes(data); err != nil {
+		return Record{}, err
+	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	token, err := decoder.Token()
 	if err != nil {
@@ -447,6 +455,30 @@ func decodeRecord(data []byte) (Record, error) {
 		return Record{}, err
 	}
 	return record, nil
+}
+
+func rejectSurrogateEscapes(data []byte) error {
+	inString := false
+	for index := 0; index < len(data); index++ {
+		switch data[index] {
+		case '"':
+			inString = !inString
+		case '\\':
+			if !inString || index+1 >= len(data) {
+				continue
+			}
+			index++
+			if data[index] != 'u' || index+4 >= len(data) {
+				continue
+			}
+			value, err := strconv.ParseUint(string(data[index+1:index+5]), 16, 16)
+			if err == nil && value >= 0xd800 && value <= 0xdfff {
+				return errors.New("peer record contains a surrogate Unicode escape")
+			}
+			index += 4
+		}
+	}
+	return nil
 }
 
 func recordPath(name string) string { return path.Join("peers", name+".json") }

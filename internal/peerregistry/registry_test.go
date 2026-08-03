@@ -239,6 +239,27 @@ func TestStrictDecodeRejectsMalformedRecords(t *testing.T) {
 	}
 }
 
+func TestStrictDecodeRejectsInvalidUnicodeEncoding(t *testing.T) {
+	fixture := newRegistryFixture(t)
+	if err := os.Mkdir(filepath.Join(fixture.directory, "peers"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for name, data := range map[string][]byte{
+		"invalid UTF-8":    append([]byte(`{"version":1,"name":"devbox","host":"`), append([]byte{0xff}, []byte(`","fingerprint":"`+testFingerprint+`"}`)...)...),
+		"surrogate escape": []byte(`{"version":1,"name":"devbox","host":"\ud800","fingerprint":"` + testFingerprint + `"}`),
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(fixture.directory, "peers", "devbox.json")
+			if err := os.WriteFile(path, data, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := fixture.registry.Get("devbox"); err == nil {
+				t.Fatal("Get() accepted invalid Unicode encoding")
+			}
+		})
+	}
+}
+
 func TestRegistryRejectsUnsafeFilesystemEntries(t *testing.T) {
 	t.Run("directory symlink", func(t *testing.T) {
 		fixture := newRegistryFixture(t)
