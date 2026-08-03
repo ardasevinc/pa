@@ -65,6 +65,32 @@ test "$(./pa list)" = "nested/password
 test" ||
     fail "pa list output should match example"
 
+# entry names must stay inside the password store
+PA_PASSWORD='reserved' ./pa add .git/config >/dev/null 2>&1 &&
+    fail "pa add should reject .git components"
+
+PA_PASSWORD='empty-category' ./pa add nested//password >/dev/null 2>&1 &&
+    fail "pa add should reject empty categories"
+
+bad_name=$(printf 'bad\nname')
+PA_PASSWORD='control' ./pa add "$bad_name" >/dev/null 2>&1 &&
+    fail "pa add should reject control characters"
+
+# parent and entry symlinks must not be followed
+mkdir "$test_root/outside"
+ln -s "$test_root/outside" "$PA_DIR/passwords/linked"
+
+PA_PASSWORD='escape' ./pa add linked/password >/dev/null 2>&1 &&
+    fail "pa add should reject a symlinked category"
+
+test ! -e "$test_root/outside/password.age" ||
+    fail "pa add should not write through a category symlink"
+
+ln -s "$PA_DIR/passwords/nested/password.age" "$PA_DIR/passwords/alias.age"
+
+./pa show alias >/dev/null 2>&1 &&
+    fail "pa show should reject a symlinked entry"
+
 # pa mv
 ./pa mv test another/nested password ||
     fail "pa mv should rename the test password"

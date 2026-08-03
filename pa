@@ -30,6 +30,8 @@ pw_add() {
             die "passwords don't match"
     fi
 
+    ensure_safe_parent "$name"
+
     mkdir -p "$(dirname -- "$name")" ||
         die "couldn't create category '$(dirname -- "$name")'"
 
@@ -91,6 +93,8 @@ pw_edit() {
 
     cmp -s "$tmpfile" "$tmpfile.orig" || [ ! -s "$tmpfile" ] && return
 
+    ensure_safe_parent "$name"
+
     mkdir -p "$(dirname -- "$name")" ||
         die "couldn't create category '$(dirname -- "$name")'"
 
@@ -122,6 +126,8 @@ pw_list() {
 }
 
 pw_move() {
+    ensure_safe_parent "$name"
+
     mkdir -p "$(dirname -- "$name")" ||
         die "couldn't create category '$(dirname -- "$name")'"
 
@@ -205,6 +211,57 @@ glob() {
     # shellcheck disable=2254
     case $1 in $2) return 0 ;; esac
     return 1
+}
+
+validate_name() {
+    value=$1 label=$2
+
+    [ "$value" ] || die "missing [$label] argument"
+
+    sanitized=$(printf %s "$value" | LC_ALL=C tr -d '[:cntrl:]')
+    [ "$sanitized" = "$value" ] ||
+        die "$label can't contain control characters"
+
+    case $value in
+    /* | */) die "$label can't start or end with '/'" ;;
+    *//* ) die "$label can't contain an empty category" ;;
+    esac
+
+    old_ifs=$IFS
+    IFS=/
+    # Split the validated relative path into components.
+    # shellcheck disable=SC2086
+    set -- $value
+    IFS=$old_ifs
+
+    for component do
+        case $component in
+        . | ..) die "$label can't contain '$component'" ;;
+        .git | .pa-*) die "$label contains reserved component '$component'" ;;
+        esac
+    done
+}
+
+ensure_safe_parent() {
+    parent=$(dirname -- "$1") current=.
+    [ "$parent" = . ] && return
+
+    old_ifs=$IFS
+    IFS=/
+    # Split the validated relative path into components.
+    # shellcheck disable=SC2086
+    set -- $parent
+    IFS=$old_ifs
+
+    for component do
+        current=$current/$component
+
+        [ ! -L "$current" ] ||
+            die "category '$current' is a symbolic link"
+
+        [ ! -e "$current" ] || [ -d "$current" ] ||
+            die "category '$current' isn't a directory"
+    done
 }
 
 die() {
@@ -295,24 +352,20 @@ main() {
     glob "$command" 'm*' && { src=$1 && [ "$src" ] ||
         die "missing [src] argument"; } && shift
 
-    # Combine the rest of positional arguments into
-    # a name and remove control characters from it
-    # so that a name can always be safely displayed.
-    name=$(printf %s "$*" | LC_ALL=C tr -d '[:cntrl:]')
+    name=$*
 
-    glob "$command" '[adesm]*' && [ -z "$name" ] &&
-        die "missing [name] argument"
+    glob "$command" '[adesm]*' && validate_name "$name" name
+    glob "$command" 'm*' && validate_name "$src" src
+    glob "$command" 'l*' && [ "$name" ] && validate_name "$name" category
 
-    glob "$command" '[adesm]*' && { glob "$name" '/*' || glob "$name" '*/' ||
-        glob "$src" '/*' || glob "$src" '*/'; } &&
-        die "name can't start or end with '/'"
+    glob "$command" '[adesm]*' && [ -L "$name.age" ] &&
+        die "password '$name' is a symbolic link"
 
-    glob "$command" 'l*' && glob "$name" '/*' &&
-        die "category can't start with '/'"
+    glob "$command" 'm*' && [ -L "$src.age" ] &&
+        die "password '$src' is a symbolic link"
 
-    glob "$name" '../*' || glob "$name" '*/../*' ||
-        glob "$src" '../*' || glob "$src" '*/../*' &&
-        die "category went out of bounds"
+    glob "$command" 'l*' && [ "$name" ] && [ -L "$name" ] &&
+        die "category '$name' is a symbolic link"
 
     glob "$command" 'm*' && [ ! -f "$src.age" ] &&
         die "password '$src' doesn't exist"
