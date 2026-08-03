@@ -11,8 +11,10 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/ardasevinc/pa/internal/agecmd"
+	"github.com/ardasevinc/pa/internal/remote"
 	"github.com/ardasevinc/pa/internal/store"
 	"github.com/ardasevinc/pa/internal/transfer"
 )
@@ -22,12 +24,16 @@ const usageText = `usage:
   pa-xfer import [options] BUNDLE
   pa-xfer verify [options] BUNDLE
   pa-xfer recipient [options]
+  pa-xfer peer --host HOST [options]
+  pa-xfer sync --host HOST --peer-fingerprint SHA256 [options]
 
 commands:
   export      decrypt this store and create a bundle for another identity
   import      add missing bundle entries, preserving every existing name
   verify      authenticate and decode a bundle without importing it
   recipient   print this store's public recipient and fingerprint
+  peer        fetch a remote store's public recipient over SSH
+  sync        push then pull through a pinned, encrypted SSH transfer
 
 common options:
   --store DIR  pa data directory (default: $PA_DIR or the pa default)
@@ -55,6 +61,12 @@ func run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int 
 		err = runVerify(ctx, arguments[1:], stdout, stderr)
 	case "recipient":
 		err = runRecipient(arguments[1:], stdout, stderr)
+	case "peer":
+		err = runPeer(ctx, arguments[1:], stdout, stderr)
+	case "sync":
+		err = runSync(ctx, arguments[1:], stdout, stderr)
+	case "serve":
+		err = runServe(ctx, arguments[1:], stdinReader{}, stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "pa-xfer: unknown command %q\n", arguments[0])
 		_, _ = io.WriteString(stderr, usageText)
@@ -69,12 +81,22 @@ func run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int 
 		fmt.Fprintf(stderr, "pa-xfer: %v\n", err)
 		return 3
 	}
+	var remoteApplied *remote.RemoteAppliedError
+	if errors.As(err, &remoteApplied) {
+		fmt.Fprintf(stderr, "pa-xfer: %v\n", err)
+		return 3
+	}
 	if errors.Is(err, flag.ErrHelp) {
 		return 0
 	}
 	fmt.Fprintf(stderr, "pa-xfer: %v\n", err)
 	return 1
 }
+
+// stdinReader keeps the process stdin dependency at the remote-only boundary.
+type stdinReader struct{}
+
+func (stdinReader) Read(data []byte) (int, error) { return os.Stdin.Read(data) }
 
 type commonFlags struct {
 	store string
@@ -215,6 +237,163 @@ func runRecipient(arguments []string, stdout, stderr io.Writer) error {
 	}
 	fmt.Fprintf(stdout, "fingerprint %s\n", fingerprint)
 	return nil
+}
+
+type sshFlags struct {
+	host    string
+	sshPath string
+	options stringList
+}
+
+type stringList []string
+
+func (s *stringList) String() string { return strings.Join(*s, " ") }
+
+func (s *stringList) Set(value string) error {
+	*s = append(*s, value)
+	return nil
+}
+
+func addSSHFlags(flags *flag.FlagSet, values *sshFlags) {
+	flags.StringVar(&values.host, "host", "", "SSH destination")
+	flags.StringVar(&values.sshPath, "ssh", "", "ssh executable")
+	flags.Var(&values.options, "ssh-option", "one ssh argument; repeat as needed")
+}
+
+func (s sshFlags) client() remote.Client {
+	return remote.Client{Host: s.host, SSHPath: s.sshPath, SSHOptions: s.options}
+}
+
+func runPeer(ctx context.Context, arguments []string, stdout, stderr io.Writer) error {
+	flags := flag.NewFlagSet("peer", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	var ssh sshFlags
+	var jsonOutput bool
+	addSSHFlags(flags, &ssh)
+	flags.BoolVar(&jsonOutput, "json", false, "emit JSON")
+	if err := flags.Parse(arguments); err != nil {
+		return err
+	}
+	if ssh.host == "" || flags.NArg() != 0 {
+		return errors.New("usage: pa-xfer peer --host HOST [options]")
+	}
+	peer, err := ssh.client().Recipient(ctx)
+	if err != nil {
+		return err
+	}
+	if jsonOutput {
+		return writeJSON(stdout, struct {
+			Fingerprint string `json:"fingerprint"`
+			Recipients  string `json:"recipients"`
+		}{Fingerprint: peer.Fingerprint, Recipients: string(peer.Recipients)})
+	}
+	if _, err := stdout.Write(peer.Recipients); err != nil {
+		return err
+	}
+	if len(peer.Recipients) > 0 && peer.Recipients[len(peer.Recipients)-1] != '\n' {
+		_, _ = io.WriteString(stdout, "\n")
+	}
+	fmt.Fprintf(stdout, "fingerprint %s\n", peer.Fingerprint)
+	return nil
+}
+
+type syncResult struct {
+	PeerFingerprint string                `json:"peer_fingerprint"`
+	Pushed          transfer.ImportResult `json:"pushed"`
+	Pulled          transfer.ImportResult `json:"pulled"`
+}
+
+func runSync(ctx context.Context, arguments []string, stdout, stderr io.Writer) error {
+	flags := flag.NewFlagSet("sync", flag.ContinueOnError)
+	var common commonFlags
+	var ssh sshFlags
+	var pinnedFingerprint string
+	addCommonFlags(flags, &common, stderr)
+	addSSHFlags(flags, &ssh)
+	flags.StringVar(&pinnedFingerprint, "peer-fingerprint", "", "expected remote recipient fingerprint")
+	if err := flags.Parse(arguments); err != nil {
+		return err
+	}
+	if ssh.host == "" || pinnedFingerprint == "" || flags.NArg() != 0 {
+		return errors.New("usage: pa-xfer sync --host HOST --peer-fingerprint SHA256 [options]")
+	}
+
+	age, local, err := openRuntime(common)
+	if err != nil {
+		return err
+	}
+	defer local.Close()
+	if _, err := local.RequireCleanGit(); err != nil {
+		return fmt.Errorf("local preflight: %w", err)
+	}
+	client := ssh.client()
+	peer, err := client.Recipient(ctx)
+	if err != nil {
+		return err
+	}
+	if !strings.EqualFold(peer.Fingerprint, pinnedFingerprint) {
+		return fmt.Errorf("remote recipient fingerprint mismatch: got %s", peer.Fingerprint)
+	}
+
+	temporaryDirectory, err := os.MkdirTemp("", "pa-sync-*")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(temporaryDirectory)
+	peerRecipients := filepath.Join(temporaryDirectory, "peer-recipients")
+	if err := os.WriteFile(peerRecipients, peer.Recipients, 0o600); err != nil {
+		return err
+	}
+	pushBundle := filepath.Join(temporaryDirectory, "push.age")
+	if _, err := transfer.Export(ctx, age, local, peerRecipients, pushBundle); err != nil {
+		return fmt.Errorf("prepare push: %w", err)
+	}
+	pushed, err := client.Push(ctx, pushBundle)
+	if err != nil {
+		return fmt.Errorf("push: %w", err)
+	}
+
+	localRecipients, err := os.ReadFile(local.RecipientsPath)
+	if err != nil {
+		return err
+	}
+	pullBundle := filepath.Join(temporaryDirectory, "pull.age")
+	if err := client.Pull(ctx, localRecipients, pullBundle); err != nil {
+		return fmt.Errorf("pull: %w", err)
+	}
+	pulled, err := transfer.Import(ctx, age, local, pullBundle)
+	result := syncResult{PeerFingerprint: peer.Fingerprint, Pushed: pushed, Pulled: pulled}
+	if common.json {
+		if jsonErr := writeJSON(stdout, result); jsonErr != nil {
+			return errors.Join(err, jsonErr)
+		}
+	} else {
+		fmt.Fprintf(stdout, "peer %s\n", peer.Fingerprint)
+		fmt.Fprintf(stdout, "push: imported %d, skipped %d\n", pushed.Imported, pushed.Skipped)
+		fmt.Fprintf(stdout, "pull: imported %d, skipped %d\n", pulled.Imported, pulled.Skipped)
+	}
+	return err
+}
+
+func runServe(ctx context.Context, arguments []string, input io.Reader, output io.Writer, stderr io.Writer) error {
+	flags := flag.NewFlagSet("serve", flag.ContinueOnError)
+	var common commonFlags
+	addCommonFlags(flags, &common, stderr)
+	if err := flags.Parse(arguments); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 {
+		return errors.New("usage: pa-xfer serve")
+	}
+	age, err := agecmd.Find(common.age)
+	if err != nil {
+		return err
+	}
+	directory, err := filepath.Abs(common.store)
+	if err != nil {
+		return err
+	}
+	return remote.Serve(ctx, age, directory, input, output)
 }
 
 func openRuntime(common commonFlags) (agecmd.Tool, *store.Store, error) {

@@ -73,6 +73,25 @@
 
     See docs/transfer-protocol.md for the format and security invariants.
 
+    For direct SSH synchronization, first fetch and independently verify the
+    remote public recipient fingerprint:
+
+      $ pa-xfer peer --host user@example
+      age1...
+      fingerprint sha256:...
+
+    Then pin that exact fingerprint for every sync:
+
+      $ pa-xfer sync --host user@example \
+          --peer-fingerprint sha256:...
+
+    Sync is an explicit push followed by a pull. Both directions preserve
+    existing names, so divergent same-name values remain local to each machine.
+    Only age-encrypted bundles cross SSH. The remote command is always exactly
+    "pa-xfer serve", SSH host-key checking is required, and SSH runs in batch
+    mode. Use repeated --ssh-option flags for connection settings, for example
+    --ssh-option=-p --ssh-option=2222.
+
 
   installation
     $ make check

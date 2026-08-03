@@ -81,5 +81,21 @@ as interpolated shell fragments. SSH host-key verification authenticates the
 machine. The peer's public age-recipient fingerprint is pinned separately to
 detect accidental identity or store changes before local secrets are decrypted.
 
+The SSH transport begins with `PAXSSH1\n` and one command byte. Each SSH
+connection handles exactly one bounded request:
+
+- `recipient` returns the public recipient file used to calculate its SHA-256
+  fingerprint.
+- `push` carries a length-delimited PAXFER1 age envelope and imports it on the
+  remote store.
+- `pull` carries the caller's public recipient file and returns a
+  length-delimited PAXFER1 age envelope encrypted to it.
+
+The recipient file is public. Secret values only occur inside the PAXFER1
+envelope, which is itself always inside an age envelope. Neither plaintext
+entries nor age identities cross the SSH process boundary.
+
 Bidirectional sync is two explicit one-way operations: push, then pull. It is
-not represented as an atomic distributed transaction.
+not represented as an atomic distributed transaction. If push succeeds and
+pull fails, rerunning is safe because imports are monotonic and never replace an
+existing name.
