@@ -15,9 +15,9 @@ import (
 )
 
 type ExportResult struct {
-	Entries uint32
-	Bytes   uint64
-	Output  string
+	Entries uint32 `json:"entries"`
+	Bytes   uint64 `json:"bytes"`
+	Output  string `json:"output"`
 }
 
 func Export(ctx context.Context, age agecmd.Tool, source *store.Store, recipientsPath, outputPath string) (result ExportResult, resultErr error) {

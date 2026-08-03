@@ -17,6 +17,7 @@
     - age
     - age-keygen
     - git (optional)
+    - Go 1.26+ (only to build pa-xfer)
 
 
   usage
@@ -37,6 +38,45 @@
       password length:  export PA_LENGTH=50
       password pattern: export PA_PATTERN=A-Za-z0-9_-
       disable tracking: export PA_NOGIT=
+
+
+  safe transfer
+    pa-xfer moves entries between pa stores while each machine keeps its own
+    age identity. Transfers are a set union by name: existing destination
+    names are always skipped, even when the two values differ. There is no
+    overwrite mode.
+
+    On the destination machine, obtain its public recipient file or inspect
+    its fingerprint:
+
+      $ pa-xfer recipient
+
+    On the source machine, encrypt a binary-safe bundle directly to that
+    recipient:
+
+      $ pa-xfer export --to ./destination-recipients ./to-destination.age
+
+    Back on the destination, verify and import it:
+
+      $ pa-xfer verify ./to-destination.age
+      $ pa-xfer import ./to-destination.age
+
+    Use --json on any pa-xfer command for machine-readable results. Import
+    requires a clean password Git repository when Git tracking is enabled.
+    Successful imports create private before/after snapshots and a receipt
+    under $PA_DIR/backups/<transaction-id>/.
+
+    The pa-export and pa-import commands are compatibility entry points for
+    pa-xfer. The old tab-delimited passphrase format is intentionally not
+    supported because it could not preserve arbitrary bytes and wrote all
+    plaintext values to a temporary file.
+
+    See docs/transfer-protocol.md for the format and security invariants.
+
+
+  installation
+    $ make check
+    $ make install PREFIX="$HOME/.local"
 
 
   command examples

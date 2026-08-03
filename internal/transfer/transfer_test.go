@@ -136,6 +136,16 @@ func TestExportImportSetUnion(t *testing.T) {
 	if exported.Entries != 2 {
 		t.Fatalf("Export() entries = %d, want 2", exported.Entries)
 	}
+	verified, err := Verify(context.Background(), age, right.store.IdentitiesPath, leftBundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if verified.Entries != exported.Entries || verified.Bytes != exported.Bytes {
+		t.Fatalf("Verify() result = %+v, want export stats %+v", verified, exported)
+	}
+	if _, err := Verify(context.Background(), age, left.store.IdentitiesPath, leftBundle); err == nil {
+		t.Fatal("Verify() accepted a bundle with the wrong identity")
+	}
 
 	imported, err := Import(context.Background(), age, right.store, leftBundle)
 	if err != nil {
@@ -248,6 +258,9 @@ func TestImportRejectsCorruptionWithoutMutation(t *testing.T) {
 
 	if _, err := Import(context.Background(), age, destination.store, truncated); err == nil {
 		t.Fatal("Import() accepted truncated ciphertext")
+	}
+	if _, err := Verify(context.Background(), age, destination.store.IdentitiesPath, truncated); err == nil {
+		t.Fatal("Verify() accepted truncated ciphertext")
 	}
 	if exists, err := destination.store.Exists("entry"); err != nil || exists {
 		t.Fatalf("corrupt import published entry: exists=%v err=%v", exists, err)
