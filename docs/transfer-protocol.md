@@ -100,6 +100,38 @@ not represented as an atomic distributed transaction. If push succeeds and
 pull fails, rerunning is safe because imports are monotonic and never replace an
 existing name.
 
+## Saved peer trust
+
+`pa-xfer sync PEER` resolves a versioned trust record from
+`$PA_DIR/peers/PEER.json`. A record contains only its canonical peer name, SSH
+destination, and the SHA-256 fingerprint of the exact raw remote recipient
+file. It does not contain recipient bytes, SSH executable paths, SSH options,
+remote commands, or secret data. Persistent connection settings belong in
+OpenSSH configuration.
+
+The registry is local to one pa store and is deliberately excluded from the
+password Git repository, transfer bundles, snapshots, and restore. Password
+rollback must not roll back a recipient trust decision.
+
+Peer directories must be real mode-0700 directories. Records must be regular,
+non-symlink mode-0600 files with canonical lowercase names and fingerprints.
+Parsing rejects duplicate or unknown JSON fields, unknown versions, trailing
+data, name/filename disagreement, oversized records, and unsafe SSH hosts.
+
+Add uses atomic no-replace publication. Replace and remove compare the current
+record with the version the operator inspected before mutating it under the
+store lock. Replace is the only operation allowed to overwrite active peer
+trust. Sync never changes the registry.
+
+Named sync loads the record, fetches and fingerprints the live recipient, and
+then re-reads the record immediately before export. A recipient mismatch or a
+concurrent local record change aborts before local password entries are
+decrypted. Pairing and explicit replacement may prompt; sync never does.
+
+The low-level `sync --host HOST --peer-fingerprint SHA256` path bypasses the
+registry and remains available for recovery from a corrupt or unavailable peer
+registry.
+
 ## Recovery boundary
 
 Import snapshots contain the complete encrypted password tree and Git metadata
