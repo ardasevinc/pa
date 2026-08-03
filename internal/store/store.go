@@ -562,13 +562,27 @@ func hostname() string {
 	return name
 }
 
-func writeNewSyncedFile(root *os.Root, name string, data []byte, mode fs.FileMode) error {
+func writeNewSyncedFile(root *os.Root, name string, data []byte, mode fs.FileMode) (returnErr error) {
 	file, err := root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
 	if err != nil {
 		return err
 	}
-	_, writeErr := file.Write(data)
-	syncErr := file.Sync()
-	closeErr := file.Close()
-	return errors.Join(writeErr, syncErr, closeErr)
+	defer func() {
+		returnErr = errors.Join(returnErr, file.Close())
+		if returnErr == nil {
+			return
+		}
+		if removeErr := root.Remove(name); removeErr != nil && !errors.Is(removeErr, fs.ErrNotExist) {
+			returnErr = errors.Join(returnErr, fmt.Errorf("remove incomplete file: %w", removeErr))
+		}
+	}()
+
+	written, err := file.Write(data)
+	if err != nil {
+		return err
+	}
+	if written != len(data) {
+		return io.ErrShortWrite
+	}
+	return file.Sync()
 }

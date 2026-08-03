@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"errors"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -199,6 +200,25 @@ func TestSnapshotCopiesPasswordTree(t *testing.T) {
 		if !bytes.Equal(source, copied) {
 			t.Errorf("snapshot mismatch for %s", relativePath)
 		}
+	}
+}
+
+func TestWriteNewSyncedFilePreservesExistingFile(t *testing.T) {
+	store := newTestStore(t)
+	const name = "existing.json"
+	if err := store.root.WriteFile(name, []byte("original"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := writeNewSyncedFile(store.root, name, []byte("replacement"), 0o600); !errors.Is(err, fs.ErrExist) {
+		t.Fatalf("writeNewSyncedFile() error = %v, want fs.ErrExist", err)
+	}
+	actual, err := store.root.ReadFile(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(actual, []byte("original")) {
+		t.Fatalf("existing file changed: %q", actual)
 	}
 }
 
